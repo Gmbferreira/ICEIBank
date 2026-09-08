@@ -1,0 +1,18 @@
+# Node
+node_modules/
+frontend/dist/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Logs gerados em tempo de execucao (nao versionar)
+agencia/data/*.jsonl
+
+# IDE / sistema
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
