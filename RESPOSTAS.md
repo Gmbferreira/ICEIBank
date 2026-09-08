@@ -1,7 +1,7 @@
 # RESPOSTAS — ICEIBank Sprint 1
 
-Aluno: **[SEU NOME — preencher]**
-Matrícula/RA (últimos 2 dígitos): **21** (OFFSET usado nas portas)
+Aluno: Guilherme Martini Brina Ferreira
+Matrícula/RA 1153221
 
 ## Resumo do que foi entregue
 
