@@ -15,7 +15,7 @@ linha do tempo ordenada pelo relógio.
   direta entre agências).
 - **Limitação conhecida (intencional)**: se uma transferência entre agências
   falhar no meio (agência de destino fora do ar), o débito aplicado NÃO é
-  revertido. Isso é proposital neste sprint — a atomicidade é resolvida no
+  revertido. Isso é proposital neste sprint - a atomicidade é resolvida no
   Sprint 4 com transações distribuídas (2PC/Saga).
 - **Autenticação**: JWT protegendo todas as rotas de contas/transferências.
 - **Frontend**: React + TypeScript + Tailwind (Vite).
@@ -28,7 +28,7 @@ Ver `RESPOSTAS.md` para as decisões de design e questões do roteiro.
 
 OBS: OFFSET pessoal = 21 (dois últimos dígitos da matrícula/RA).
 
-### Backend (3 terminais — Windows PowerShell)
+### Backend (3 terminais - Windows PowerShell)
 
 ```powershell
 cd agencia
@@ -66,7 +66,7 @@ npm run dev
 
 | Verbo | Rota | Autenticação | Descrição |
 |-------|------|--------------|-----------|
-| POST | `/auth/login` | — | Login; retorna JWT |
+| POST | `/auth/login` | - | Login; retorna JWT |
 | POST | `/contas` | JWT | Criar conta (só se `id % 3 === agência`) |
 | GET | `/contas/{id}` | JWT | Consultar saldo |
 | POST | `/contas/{id}/depositar` | JWT | Depósito |
