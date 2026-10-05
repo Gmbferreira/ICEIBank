@@ -348,11 +348,11 @@ export default function App() {
 
             {historico.length > 0 && (
               <section className="rounded-lg bg-white p-5 shadow">
-                <h2 className="mb-3 font-semibold">Histórico (ordenado por Lamport)</h2>
+                <h2 className="mb-3 font-semibold">Histórico (ordenado por vetor)</h2>
                 <table className="w-full text-left text-sm">
                   <thead>
                     <tr className="border-b text-slate-500">
-                      <th className="py-1 pr-3">Lamport</th>
+                      <th className="py-1 pr-3">Vetor</th>
                       <th className="py-1 pr-3">Tipo</th>
                       <th className="py-1">Detalhes</th>
                     </tr>
@@ -360,7 +360,7 @@ export default function App() {
                   <tbody>
                     {historico.map((evento, i) => (
                       <tr key={i} className="border-b last:border-0">
-                        <td className="py-1 pr-3 font-mono">{evento.timestampLamport}</td>
+                        <td className="py-1 pr-3 font-mono">[{evento.timestampVetorial.join(", ")}]</td>
                         <td className="py-1 pr-3">{evento.tipo}</td>
                         <td className="py-1 font-mono text-xs">
                           {JSON.stringify(evento.detalhes)}

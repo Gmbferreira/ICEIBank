@@ -7,7 +7,7 @@ export interface Conta {
 export interface EventoHistorico {
   agencia: string;
   tipo: string;
-  timestampLamport: number;
+  timestampVetorial: number[];
   horaParede: string;
   detalhes: Record<string, unknown>;
 }
