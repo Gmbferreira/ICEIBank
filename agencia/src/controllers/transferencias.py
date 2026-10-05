@@ -25,9 +25,9 @@ async def transferir(request: Request, dados: TransferenciaRequest):
     agencia_destino = config.agencia_responsavel(dados.idDestino)
 
     # O debito e sempre local, pois esta agencia e a dona da conta de origem.
-    ts_debito = relogio.evento_local()
+    vetor_debito = relogio.evento_local()
     conta_origem.saldo -= dados.valor
-    registro.registrar("TRANSFERENCIA_DEBITO", ts_debito, {
+    registro.registrar("TRANSFERENCIA_DEBITO", vetor_debito, {
         "idOrigem": dados.idOrigem,
         "idDestino": dados.idDestino,
         "valor": dados.valor,
@@ -35,14 +35,14 @@ async def transferir(request: Request, dados: TransferenciaRequest):
 
     if agencia_destino == id_agencia:
         # Caso simples: mesma agencia, credita direto (sem mensagem entre agencias,
-        # portanto sem aoEnviar/aoReceber do relogio de Lamport).
+        # portanto sem ao_enviar/ao_receber do relogio vetorial).
         conta_destino = contas.get(dados.idDestino)
         if conta_destino is None:
             conta_origem.saldo += dados.valor
             raise HTTPException(status_code=404, detail="Conta de destino nao encontrada.")
-        ts_credito = relogio.evento_local()
+        vetor_credito = relogio.evento_local()
         conta_destino.saldo += dados.valor
-        registro.registrar("TRANSFERENCIA_CREDITO", ts_credito, {
+        registro.registrar("TRANSFERENCIA_CREDITO", vetor_credito, {
             "idOrigem": dados.idOrigem,
             "idDestino": dados.idDestino,
             "valor": dados.valor,
@@ -50,7 +50,7 @@ async def transferir(request: Request, dados: TransferenciaRequest):
         return {"mensagem": "Transferencia concluida (mesma agencia)."}
 
     # Caso entre agencias: chama a agencia de destino diretamente via REST.
-    ts_envio = relogio.ao_enviar()
+    vetor_envio = relogio.ao_enviar()
     url_destino = next(a for a in config.AGENCIAS if a["id"] == agencia_destino)["url"]
     token_servico = gerar_token_servico(id_agencia)
 
@@ -60,7 +60,7 @@ async def transferir(request: Request, dados: TransferenciaRequest):
                 f"{url_destino}/contas/{dados.idDestino}/creditar-remoto",
                 json={
                     "valor": dados.valor,
-                    "timestampLamport": ts_envio,
+                    "timestampVetorial": vetor_envio,
                     "origemAgencia": id_agencia,
                 },
                 headers={"Authorization": f"Bearer {token_servico}"},
@@ -92,16 +92,16 @@ def creditar_remoto(request: Request, id_conta: int, dados: CreditarRemotoReques
     registro = request.app.state.registro
     contas = request.app.state.contas
 
-    # Ao RECEBER uma mensagem de outra agencia, o relogio de Lamport e
-    # atualizado com base no timestamp recebido - regra 3 do algoritmo.
-    ts = relogio.ao_receber(dados.timestampLamport)
+    # Ao RECEBER uma mensagem de outra agencia, o relogio vetorial e atualizado
+    # com base no vetor recebido - regra 3 do algoritmo.
+    vetor = relogio.ao_receber(dados.timestampVetorial)
 
     conta = contas.get(id_conta)
     if conta is None:
         raise HTTPException(status_code=404, detail="Conta nao encontrada nesta agencia.")
 
     conta.saldo += dados.valor
-    registro.registrar("TRANSFERENCIA_CREDITO_REMOTO", ts, {
+    registro.registrar("TRANSFERENCIA_CREDITO_REMOTO", vetor, {
         "idConta": id_conta,
         "valor": dados.valor,
         "origemAgencia": dados.origemAgencia,

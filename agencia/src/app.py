@@ -7,7 +7,7 @@ from fastapi.responses import JSONResponse
 import src.config as config
 from src.controllers import auth, contas, transferencias
 from src.services.registro_eventos import RegistroEventos
-from src.services.relogio_lamport import RelogioLamport
+from src.services.relogio_vetorial import RelogioVetorial
 
 
 def create_app():
@@ -29,7 +29,7 @@ def create_app():
 
     # Estado compartilhado por todos os controllers desta agencia.
     app.state.id_agencia = id_agencia
-    app.state.relogio = RelogioLamport()
+    app.state.relogio = RelogioVetorial(id_agencia, config.NUMERO_AGENCIAS)
     app.state.registro = RegistroEventos(f"agencia-{id_agencia}")
     app.state.contas = {}
 

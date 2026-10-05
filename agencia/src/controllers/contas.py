@@ -76,7 +76,7 @@ def sacar(request: Request, id_conta: int, dados: ValorRequest):
 @router.get("/{id_conta}/historico", dependencies=[Depends(obter_usuario_atual)])
 def historico_conta(request: Request, id_conta: int):
     """Funcionalidade adicional: lista os eventos registrados da conta,
-    ordenados pelo relogio de Lamport."""
+    ordenados pelo relogio vetorial."""
     registro = request.app.state.registro
     contas = request.app.state.contas
 

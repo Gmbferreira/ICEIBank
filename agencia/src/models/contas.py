@@ -25,7 +25,7 @@ class TransferenciaRequest(BaseModel):
 
 class CreditarRemotoRequest(BaseModel):
     valor: float
-    timestampLamport: int
+    timestampVetorial: list[int]
     origemAgencia: int
 
 
