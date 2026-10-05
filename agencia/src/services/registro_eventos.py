@@ -33,7 +33,12 @@ class RegistroEventos:
         }
         with open(self.caminho_arquivo, "a", encoding="utf-8") as arquivo:
             arquivo.write(json.dumps(evento, ensure_ascii=False) + "\n")
-        print(f"[Vetor {timestamp_vetorial}] {tipo} {detalhes}")
+        # flush=True e obrigatorio: em terminal o stdout e line-buffered e a
+        # linha aparece na hora, mas com a saida redirecionada para arquivo
+        # (Test-Path, Tee-Object, log de evidencia) o Python usa buffer de bloco e
+        # o evento so apareceria no fim do processo - ou nunca, se o processo fosse
+        # derrubado com Ctrl+C antes.
+        print(f"[Vetor {timestamp_vetorial}] {tipo} {detalhes}", flush=True)
         return evento
 
     def ler_eventos(self):

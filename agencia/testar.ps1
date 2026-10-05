@@ -94,7 +94,8 @@ function Conectar {
 }
 
 function Mostrar-Filas {
-    Mostrar-Data "Filas no RabbitMQ (messagens retidas / consumidores)"
+    param([switch]$Corpo)
+    Mostrar-Data "Filas no RabbitMQ (mensagens retidas / consumidores)"
     $python = Join-Path $PSScriptRoot ".venv\Scripts\python.exe"
     if (-not (Test-Path $python)) { $python = Join-Path $PSScriptRoot ".venv/Scripts/python.exe" }
     if (-not (Test-Path $python)) {
@@ -105,7 +106,9 @@ function Mostrar-Filas {
         Write-Host "     RABBITMQ_URL nao definida neste terminal - pulei a consulta das filas." -ForegroundColor Yellow
         return
     }
-    & $python (Join-Path $PSScriptRoot "filas.py") --alerta
+    $opcoes = @("--alerta")
+    if ($Corpo) { $opcoes += "--corpo" }
+    & $python (Join-Path $PSScriptRoot "filas.py") @opcoes
 }
 
 # ---------------------------------------------------------------- etapas
@@ -153,6 +156,9 @@ function EtapaResiliencia {
     Start-Sleep -Seconds 1
     Mostrar-Data "A mensagem ficou retida em fila-agencia-1 (a agencia esta fora do ar)"
     Mostrar-Filas
+    Write-Host ""
+    Write-Host "  Proximo passo: suba a agencia 1 de novo e rode -Etapa pos. O credito nao sera" -ForegroundColor Yellow
+    Write-Host "  aplicado (a conta 1 sumiu no restart) e deve parar em fila-agencia-1.falhas." -ForegroundColor Yellow
 }
 
 function EtapaPos {
@@ -162,10 +168,12 @@ function EtapaPos {
     Invoke-Api -Agencia 1 -Rota "/contas/1" | Out-Null
 
     Start-Sleep -Seconds 2
-    Mostrar-Data "O que o consumidor registrou ao receber a mensagem retida"
-    Write-Host "  Esperado no terminal da agencia 1: [Vetor [...]] CREDITO_REMOTO_FALHOU (motivo: conta nao encontrada)" -ForegroundColor Yellow
+    Mostrar-Data "O credito recusado foi preservado na dead-letter queue?"
+    Write-Host "  No terminal da agencia 1: [Vetor [...]] CREDITO_REMOTO_FALHOU (conta nao encontrada)" -ForegroundColor Yellow
+    Write-Host "  E a fila principal esvaziou: o credito nao sumiu, foi guardado em" -ForegroundColor Yellow
+    Write-Host "  fila-agencia-1.falhas (1 mensagem), em vez de ser descartado em silencio." -ForegroundColor Yellow
     Invoke-Api -Agencia 1 -Rota "/contas/0" | Out-Null
-    Mostrar-Filas
+    Mostrar-Filas -Corpo
 }
 
 # ---------------------------------------------------------------- execucao

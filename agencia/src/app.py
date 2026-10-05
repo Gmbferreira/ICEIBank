@@ -7,7 +7,12 @@ from fastapi.responses import JSONResponse
 
 import src.config as config
 from src.controllers import auth, contas, transferencias
-from src.services.mensageria import fechar_publicador, iniciar_consumidor, parar_consumidor
+from src.services.mensageria import (
+    CreditoRecusado,
+    fechar_publicador,
+    iniciar_consumidor,
+    parar_consumidor,
+)
 from src.services.registro_eventos import RegistroEventos
 from src.services.relogio_vetorial import RelogioVetorial
 
@@ -23,6 +28,11 @@ def processar_credito_remoto(app, mensagem):
     mensagem e e incorporado pela regra 3 (ao_receber) antes de registrar o
     evento, e o que fica gravado e o vetor RESULTANTE - e ele que permite dizer
     mais tarde se este credito foi causa de algum evento local posterior.
+
+    Levantar CreditoRecusado (e nao apenas registrar e voltar) e o que leva a
+    mensagem para a dead-letter queue: um return aqui faria o consumidor
+    confirmar (ack) o delivery_tag e o credito nao aplicavel sumiria sem deixar
+    rastro.
     """
     relogio = app.state.relogio
     registro = app.state.registro
@@ -39,13 +49,17 @@ def processar_credito_remoto(app, mensagem):
         # Caso conhecido e reproduzido na Parte C: as contas vivem em memoria,
         # entao se esta agencia reiniciou, a conta que deveria receber o credito
         # nao existe mais - a mensagem chegou, mas nao ha onde aplicar o valor.
+        motivo = "conta nao encontrada"
         registro.registrar("CREDITO_REMOTO_FALHOU", vetor, {
             "idConta": id_conta,
             "valor": valor,
             "origemAgencia": origem_agencia,
-            "motivo": "conta nao encontrada",
+            "motivo": motivo,
         })
-        return
+        raise CreditoRecusado(
+            f"conta {id_conta} nao existe nesta agencia (credito de {valor} "
+            f"publicado pela agencia {origem_agencia})"
+        )
 
     conta.saldo += valor
     registro.registrar("TRANSFERENCIA_CREDITO_REMOTO", vetor, {

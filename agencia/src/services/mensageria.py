@@ -9,7 +9,16 @@ import pika
 #   - uma fila duravel por agencia (fila-agencia-<id>);
 #   - routing key no formato agencia.<id>.creditar, para que cada agencia receba
 #     apenas os creditos destinados a ela, mesmo com a exchange sendo comum.
+#   - uma dead-letter exchange (iceibank.dlx) e uma fila de falhas por agencia
+#     (fila-agencia-<id>.falhas): o que a agencia nao conseguiu aplicar nao e
+#     descartado em silencio, e guardado para inspecao.
 EXCHANGE = "iceibank.eventos"
+EXCHANGE_DLX = "iceibank.dlx"
+
+# As mensagens rejeitadas ficam na DLQ por uma semana e depois somem sozinhas:
+# elas servem para inspecao/diagnostico, nao para reprocessamento automatico.
+# (Se o requisito for reentrega manual, deixar sem TTL.)
+TTL_FILA_FALHAS_MS = 7 * 24 * 60 * 60 * 1000
 
 URL_RABBITMQ = os.getenv("RABBITMQ_URL")
 if not URL_RABBITMQ:
@@ -21,8 +30,44 @@ if not URL_RABBITMQ:
     )
 
 
+class CreditoRecusado(Exception):
+    """Recusa de negocio: a mensagem chegou, mas nao pode ser aplicada.
+
+    Separar isto de um erro inesperado e o que permite decidir, no consumidor, entre
+    "descartar" e "guardar na dead-letter queue". Um erro de programacao tambem
+    cai na DLQ (ninguem quer perder a evidencia), mas o log mostra os dois casos
+    com clareza.
+    """
+
+
 def nome_fila(id_agencia):
     return f"fila-agencia-{id_agencia}"
+
+
+def nome_fila_falhas(id_agencia):
+    """Fila de mensagens que a agencia recebeu e nao conseguiu aplicar."""
+    return f"fila-agencia-{id_agencia}.falhas"
+
+
+def routing_key_credito(id_agencia):
+    return f"agencia.{id_agencia}.creditar"
+
+
+def routing_key_falha(id_agencia):
+    return f"agencia.{id_agencia}.creditar.falha"
+
+
+def argumentos_fila(id_agencia):
+    """Argumentos de declaracao da fila principal (dead-letter).
+
+    RabbitMQ so aceita re-declarar uma fila existente com os MESMOS argumentos: se
+    as filas do projeto ja existissem sem estes dois campos, o queue_declare
+    responderia 406 PRECONDITION_FAILED e o consumidor morreria no startup.
+    """
+    return {
+        "x-dead-letter-exchange": EXCHANGE_DLX,
+        "x-dead-letter-routing-key": routing_key_falha(id_agencia),
+    }
 
 
 def descrever_erro(erro):
@@ -148,6 +193,14 @@ def iniciar_consumidor(id_agencia, ao_receber_mensagem):
     Roda em uma thread daemon: o consumo e bloqueante, e se rodasse na thread do
     servidor HTTP ele travaria a API inteira. A thread e daemon para nao
     impedir o encerramento do processo no Ctrl+C.
+
+    Politica de confirmacao (o coracao da Etapa 4 - dead-letter queue):
+        mensagem aplicada            -> basic_ack
+        recusa de negocio            -> basic_nack(requeue=False) -> DLQ
+        erro inesperado              -> basic_nack(requeue=False) -> DLQ
+        agencia cai no meio do trato -> sem confirmacao, o broker devolve o
+                                         delivery_tag para a fila (a garantia de
+                                         "ao menos uma vez" do AMQP)
     """
     parar = threading.Event()
 
@@ -156,11 +209,26 @@ def iniciar_consumidor(id_agencia, ao_receber_mensagem):
         try:
             canal = conexao.channel()
             canal.exchange_declare(exchange=EXCHANGE, exchange_type="topic", durable=True)
-            canal.queue_declare(queue=nome_fila(id_agencia), durable=True)
+            canal.exchange_declare(exchange=EXCHANGE_DLX, exchange_type="topic", durable=True)
+            canal.queue_declare(
+                queue=nome_fila(id_agencia), durable=True, arguments=argumentos_fila(id_agencia)
+            )
             canal.queue_bind(
                 queue=nome_fila(id_agencia),
                 exchange=EXCHANGE,
                 routing_key=routing_key_credito(id_agencia),
+            )
+            # A fila de falhas: uma por agencia, onde o broker deposita o que foi
+            # descartado com basic_nack(requeue=False).
+            canal.queue_declare(
+                queue=nome_fila_falhas(id_agencia),
+                durable=True,
+                arguments={"x-message-ttl": TTL_FILA_FALHAS_MS},
+            )
+            canal.queue_bind(
+                queue=nome_fila_falhas(id_agencia),
+                exchange=EXCHANGE_DLX,
+                routing_key=routing_key_falha(id_agencia),
             )
             # Uma mensagem por vez: preserva a ordem de causalidade dos creditos.
             canal.basic_qos(prefetch_count=1)
@@ -169,13 +237,18 @@ def iniciar_consumidor(id_agencia, ao_receber_mensagem):
                 mensagem = json.loads(corpo.decode("utf-8"))
                 try:
                     ao_receber_mensagem(mensagem)
+                except CreditoRecusado as recusa:
+                    # Recusa de negocio (ex.: a conta destino nao existe mais). A
+                    # mensagem nao volta para a fila principal - assim nao ha laco
+                    # de mensagem "venenosa" - e o broker a deposita na DLQ.
+                    print(f"[RabbitMQ] credito recusado: {recusa}", flush=True)
+                    _canal.basic_nack(delivery_tag=metodo.delivery_tag, requeue=False)
                 except Exception as erro:  # noqa: BLE001
-                    # Nao fazer ack: sem confirmacao, a mensagem volta para a
-                    # fila quando a conexao cair. Em producao o caminho esperado
-                    # seria o contrario - nack sem requeue para uma dead-letter
-                    # queue, para nao ficar em laco com uma mensagem "venenosa"
-                    # (funcionalidade adicional do Sprint 2, Etapa 4).
+                    # Erro inesperado tambem vai para a DLQ: perder a mensagem
+                    # silenciosamente seria pior do que deixar o registro pendente
+                    # para alguem investigar.
                     print(f"[RabbitMQ] erro ao tratar mensagem: {descrever_erro(erro)}")
+                    _canal.basic_nack(delivery_tag=metodo.delivery_tag, requeue=False)
                 else:
                     _canal.basic_ack(delivery_tag=metodo.delivery_tag)
 

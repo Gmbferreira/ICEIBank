@@ -55,6 +55,79 @@ executadas na API.
 
 ---
 
+## Funcionalidade adicional (Sprint 2) - Dead-letter queue
+
+O Publish/Subscribe resolve o problema do Sprint 1 (débito sem crédito quando a
+agência de destino está fora do ar), mas cria um caso novo: e se a mensagem
+chegar ao destino e ainda assim não puder ser aplicada? É exatamente o que
+acontece no teste de resiliência — a agência 1 reinicia, as contas (em memória)
+somem, e o crédito publicado pela agência 0 chega para uma conta que não existe
+mais. Antes da DLQ, o consumidor confirmava (`basic_ack`) a mensagem e ela
+desaparecia sem deixar rastro: dinheiro debitado na origem, nenhuma prova do que
+foi perdido.
+
+**Topologia.** Cada agência tem duas filas: a principal (`fila-agencia-<id>`) e
+a de falhas (`fila-agencia-<id>.falhas`). A principal é declarada com dois
+argumentos que a ligam à dead-letter exchange:
+
+```
+fila-agencia-<id>  --(x-dead-letter-exchange=iceibank.dlx,
+                       x-dead-letter-routing-key=agencia.<id>.creditar.falha)-->  iceibank.dlx
+iceibank.dlx (topic, durable)  --(agencia.<id>.creditar.falha)-->  fila-agencia-<id>.falhas
+```
+
+**Política de confirmação** (`src/services/mensageria.py`):
+
+| Situação | Confirmação | Efeito |
+|---|---|---|
+| Crédito aplicado | `basic_ack` | mensagem consumida |
+| Recusa de negócio (`CreditoRecusado`) | `basic_nack(requeue=False)` | vai para a DLQ |
+| Erro inesperado | `basic_nack(requeue=False)` | vai para a DLQ |
+| Agência cai no meio do tratamento | nenhuma | o broker devolve o `delivery_tag` à fila |
+
+`requeue=False` é o que evita o laço de mensagem "venenosa": se a causa for
+permanente (conta que não existe mais), reentregar a mesma mensagem para a mesma
+agência ia repetir a falha indefinidamente. Perdemos a chance de reprocessamento
+automático, mas ganhamos o registro do que falhou — que é o objetivo. Como o
+sistema não tem como reentregar sozinho (o publicador não guarda o resultado),
+quem reentrega é uma pessoa, olhando a DLQ.
+
+A separação entre `CreditoRecusado` e erro inesperado não muda o destino (ambos
+vão para a DLQ), mas muda o que aparece no log — dá para distinguir "não havia
+conta" de "deu exception", que são problemas de naturezas diferentes.
+
+**Por que a fila de falhas tem TTL de 7 dias.** Mensagens rejeitadas servem para
+diagnóstico, não para reprocessamento automático. Sem expiração elas ficariam
+ocupando disco indefinidamente; `x-message-ttl = 604800000` (7 dias) faz o
+broker descartá-las sozinho depois de uma semana.
+
+**Detalhe operacional que custou tempo:** o RabbitMQ só aceita re-declarar uma
+fila existente se os argumentos forem idênticos. Ao acrescentar os argumentos de
+dead-letter, o `queue_declare` das filas que já existiam respondia **406
+PRECONDITION_FAILED** e o consumidor morria no startup. As filas do projeto
+precisaram ser deletadas uma vez, para que a agência as recriasse já com a
+DLX — de lá a necessidade de o script de evidência avisar o número de
+consumidores por fila (`agencia/filas.py --alerta`), já que um processo antigo
+conectado à mesma fila roubaria a mensagem e o crédito apareceria na agência
+errada.
+
+**Onde está no código:**
+- `agencia/src/services/mensageria.py` → `EXCHANGE_DLX`, `nome_fila_falhas`,
+  `argumentos_fila`, `CreditoRecusado` e a política de `ack`/`nack` no callback
+- `agencia/src/app.py` → `processar_credito_remoto` levanta `CreditoRecusado`
+  (um `return` silencioso faria o consumidor confirmar a mensagem)
+- `agencia/filas.py` → listagem das DLQs e leitura do conteúdo (`--corpo`, que
+  devolve cada mensagem à fila, sem consumir)
+
+**Evidência:** `evidencias/sprint2/dlq.png`
+
+Saída real do teste de resiliência: a agência 1 registra
+`[Vetor [5, 1, 0]] CREDITO_REMOTO_FALHOU` com motivo `conta nao encontrada`, e a
+mensagem aparece em `fila-agencia-1.falhas` com o corpo
+`{"idConta": 1, "valor": 20.0, "vetorEnvio": [5, 0, 0], "origemAgencia": 0}`.
+
+---
+
 ## Parte B (seção 6.4)
 
 **P1 - Por que o relógio de Lamport usa `max(contador_local, timestampRecebido) + 1`
