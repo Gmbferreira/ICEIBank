@@ -11,6 +11,11 @@ venv/
 # Logs gerados em tempo de execucao (nao versionar)
 agencia/data/*.jsonl
 
+# Segredos: a URL do RabbitMQ (com usuario e senha) fica so em variavel de
+# ambiente / .env local, nunca no git.
+.env
+*.env
+
 # IDE / sistema
 .vscode/
 .idea/

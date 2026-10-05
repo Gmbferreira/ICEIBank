@@ -23,12 +23,6 @@ class TransferenciaRequest(BaseModel):
     valor: float
 
 
-class CreditarRemotoRequest(BaseModel):
-    valor: float
-    timestampVetorial: list[int]
-    origemAgencia: int
-
-
 class LoginRequest(BaseModel):
     usuario: str
     senha: str

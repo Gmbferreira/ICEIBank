@@ -37,24 +37,6 @@ def gerar_token(usuario, **claims_extra):
     return jwt.encode(payload, SECRET_KEY, algorithm="HS256")
 
 
-def gerar_token_servico(id_agencia_origem, validade_min=2):
-    """Token curto para a chamada interna agencia-a-agencia (creditar-remoto).
-
-    Decisao de design (ver RESPOSTAS.md): chamadas internas NAO usam o token de
-    usuario do frontend; usam um token de servico com claim 'servico: true',
-    assinado com a mesma chave, com expiracao curta. O frontend nunca recebe
-    esse claim.
-    """
-    payload = {
-        "sub": f"agencia-{id_agencia_origem}",
-        "iat": datetime.datetime.now(datetime.timezone.utc),
-        "exp": datetime.datetime.now(datetime.timezone.utc)
-        + datetime.timedelta(minutes=validade_min),
-        "servico": True,
-    }
-    return jwt.encode(payload, SECRET_KEY, algorithm="HS256")
-
-
 def gerar_token_expirado(usuario="teste"):
     """Usado apenas para evidenciar o cenario 'token expirado' nos testes."""
     payload = {

@@ -35,14 +35,7 @@ def obter_usuario_atual(credenciais: HTTPAuthorizationCredentials = Depends(segu
         raise HTTPException(status_code=401, detail="Token invalido.")
 
 
-def obter_token_servico(credenciais: HTTPAuthorizationCredentials = Depends(seguranca)):
-    """Dependencia exclusiva da chamada interna agencia-a-agencia.
-
-    Decisao de design (ver RESPOSTAS.md): creditar-remoto exige um token com o
-    claim 'servico: true', que so as proprias agencias conseguem gerar. O token
-    de usuario do frontend (sem esse claim) nao e aceito nessa rota.
-    """
-    payload = obter_usuario_atual(credenciais)
-    if not payload.get("servico"):
-        raise HTTPException(status_code=401, detail="Token de servico exigido para chamada interna.")
-    return payload
+# Sprint 2: a rota interna creditar-remoto deixou de existir (o credito remoto
+# passa a chegar pelo consumidor do RabbitMQ), e com ela o token de servico que
+# a autorizava. Nao ha mais chamada HTTP entre agencias, logo nao ha mais o que
+# esse token autorizava - ver RESPOSTAS.md.

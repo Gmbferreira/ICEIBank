@@ -2,3 +2,4 @@ fastapi
 uvicorn[standard]
 httpx
 PyJWT
+pika>=1.3,<2

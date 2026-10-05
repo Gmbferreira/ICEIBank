@@ -1,10 +1,11 @@
-import httpx
+import pika
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.concurrency import run_in_threadpool
 
 import src.config as config
-from src.controllers.auth import obter_token_servico, obter_usuario_atual
-from src.models.contas import CreditarRemotoRequest, TransferenciaRequest
-from src.services.auth_service import gerar_token_servico
+from src.controllers.auth import obter_usuario_atual
+from src.models.contas import TransferenciaRequest
+from src.services.mensageria import publicar, routing_key_credito
 
 router = APIRouter(tags=["transferencias"])
 
@@ -49,61 +50,53 @@ async def transferir(request: Request, dados: TransferenciaRequest):
         })
         return {"mensagem": "Transferencia concluida (mesma agencia)."}
 
-    # Caso entre agencias: chama a agencia de destino diretamente via REST.
+    # Caso entre agencias (Sprint 2): em vez de chamar a outra agencia por REST,
+    # publica-se um evento na exchange. Quem aplica o credito e a agencia de
+    # destino, quando ela estiver disponivel - mesmo que esteja fora do ar no
+    # momento da publicacao, porque a mensagem fica retida na fila duravel.
     vetor_envio = relogio.ao_enviar()
-    url_destino = next(a for a in config.AGENCIAS if a["id"] == agencia_destino)["url"]
-    token_servico = gerar_token_servico(id_agencia)
 
     try:
-        async with httpx.AsyncClient(timeout=5.0) as cliente:
-            resposta = await cliente.post(
-                f"{url_destino}/contas/{dados.idDestino}/creditar-remoto",
-                json={
-                    "valor": dados.valor,
-                    "timestampVetorial": vetor_envio,
-                    "origemAgencia": id_agencia,
-                },
-                headers={"Authorization": f"Bearer {token_servico}"},
-            )
-        resposta.raise_for_status()
-    except httpx.HTTPError as erro:
-        # LIMITACAO CONHECIDA: se esta chamada falhar, o debito ja aplicado
-        # acima NAO e revertido - o dinheiro "desaparece" temporariamente.
-        # Resolver isso de forma correta (atomicidade sob falha) e assunto do
-        # Sprint 4 (transacao distribuida 2PC/Saga). Aqui registramos a
-        # inconsistencia no log.
-        registro.registrar("TRANSFERENCIA_FALHOU", relogio.evento_local(), {
+        # O publicacao e bloqueante (pika), entao vai para uma thread do pool:
+        # se fosse direto aqui, travaria o event loop do servidor.
+        await run_in_threadpool(
+            publicar,
+            routing_key_credito(agencia_destino),
+            {
+                "idConta": dados.idDestino,
+                "valor": dados.valor,
+                "vetorEnvio": vetor_envio,
+                "origemAgencia": id_agencia,
+            },
+        )
+    except (pika.exceptions.AMQPError, OSError) as erro:
+        # O broker nao assumiu a mensagem, entao o debito acima e desfeito: aqui
+        # NAO ha o problema do Sprint 1 (dinheiro pendurado sem entrega). Com a
+        # publicacao confirmada pelo broker, "publicou" significa "o broker
+        # assumiu a responsabilidade de entregar".
+        registro.registrar("TRANSFERENCIA_PUBLICACAO_FALHOU", relogio.evento_local(), {
             "idOrigem": dados.idOrigem,
             "idDestino": dados.idDestino,
             "valor": dados.valor,
             "erro": str(erro),
         })
+        conta_origem.saldo += dados.valor
         raise HTTPException(
             status_code=502,
-            detail="Falha ao contatar agencia de destino. Debito ja aplicado - inconsistencia conhecida (ver Sprint 4).",
+            detail="Falha ao publicar a transferencia no broker. Debito revertido.",
         )
 
-    return {"mensagem": "Transferencia concluida (entre agencias)."}
-
-
-@router.post("/contas/{id_conta}/creditar-remoto", dependencies=[Depends(obter_token_servico)])
-def creditar_remoto(request: Request, id_conta: int, dados: CreditarRemotoRequest):
-    relogio = request.app.state.relogio
-    registro = request.app.state.registro
-    contas = request.app.state.contas
-
-    # Ao RECEBER uma mensagem de outra agencia, o relogio vetorial e atualizado
-    # com base no vetor recebido - regra 3 do algoritmo.
-    vetor = relogio.ao_receber(dados.timestampVetorial)
-
-    conta = contas.get(id_conta)
-    if conta is None:
-        raise HTTPException(status_code=404, detail="Conta nao encontrada nesta agencia.")
-
-    conta.saldo += dados.valor
-    registro.registrar("TRANSFERENCIA_CREDITO_REMOTO", vetor, {
-        "idConta": id_conta,
+    registro.registrar("TRANSFERENCIA_PUBLICADA", vetor_envio, {
+        "idOrigem": dados.idOrigem,
+        "idDestino": dados.idDestino,
         "valor": dados.valor,
-        "origemAgencia": dados.origemAgencia,
+        "agenciaDestino": agencia_destino,
+        "routingKey": routing_key_credito(agencia_destino),
     })
-    return {"mensagem": "Credito remoto aplicado.", "saldoAtual": conta.saldo}
+
+    # Repare na mudanca de sentido da resposta: 200 significa "a mensagem foi
+    # publicada", nao "o credito ja foi aplicado na outra agencia".
+    return {
+        "mensagem": "Transferencia publicada para a agencia de destino (entrega assincrona).",
+        "status": "publicada",
+    }
