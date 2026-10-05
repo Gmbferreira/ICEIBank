@@ -5,7 +5,7 @@ from fastapi.concurrency import run_in_threadpool
 import src.config as config
 from src.controllers.auth import obter_usuario_atual
 from src.models.contas import TransferenciaRequest
-from src.services.mensageria import publicar, routing_key_credito
+from src.services.mensageria import descrever_erro, publicar, routing_key_credito
 
 router = APIRouter(tags=["transferencias"])
 
@@ -78,7 +78,7 @@ async def transferir(request: Request, dados: TransferenciaRequest):
             "idOrigem": dados.idOrigem,
             "idDestino": dados.idDestino,
             "valor": dados.valor,
-            "erro": str(erro),
+            "erro": descrever_erro(erro),
         })
         conta_origem.saldo += dados.valor
         raise HTTPException(

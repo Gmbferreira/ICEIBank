@@ -25,6 +25,18 @@ def nome_fila(id_agencia):
     return f"fila-agencia-{id_agencia}"
 
 
+def descrever_erro(erro):
+    """Texto util para registrar uma excecao do pika.
+
+    O str() de varias excecoes do pika vem vazio - AMQPConnectionError, por
+    exemplo, devolve "" mesmo tendo a causa real em .args. Sem isso, o log da
+    evidencia mostrava "erro": "" e a falha ficava sem explicacao. O nome da
+    excecao vem sempre; a causa vem do str() quando existe e dos args quando nao.
+    """
+    detalhe = str(erro) or repr(getattr(erro, "args", ()))
+    return f"{type(erro).__name__}: {detalhe}"
+
+
 def routing_key_credito(id_agencia):
     return f"agencia.{id_agencia}.creditar"
 
@@ -37,12 +49,28 @@ _conexao_publicacao = None
 _canal_publicacao = None
 
 
+def _conectar_publicador():
+    parametros = pika.URLParameters(URL_RABBITMQ)
+    # heartbeat=0 desliga o mecanismo de heartbeat de proposito. Um
+    # BlockingConnection so envia heartbeats quando alguem chama
+    # process_data_events, e o publicador fica ocioso entre transferencias: com
+    # heartbeat ativo o broker dropava a conexao depois de ~2 intervalos e a
+    # transferencia seguinte falhava com "Stream connection lost: EOF" mesmo com o
+    # RabbitMQ saudavel. Sem heartbeat, quem detecta conexao morta e o proprio
+    # basic_publish - e o retry de publicar() refaz a conexao.
+    parametros.heartbeat = 0
+    # Se o broker/publicar ficar bloqueado, nao travar a request HTTP por muito
+    # tempo: o chamador precisa receber o erro para reverter o debito.
+    parametros.blocked_connection_timeout = 5
+    parametros.socket_timeout = 5
+    return pika.BlockingConnection(parametros)
+
+
 def _abrir_canal_publicacao():
     """Abre (ou reaproveita) a conexao do publicador. Exige o lock ocupado."""
     global _conexao_publicacao, _canal_publicacao
     if _canal_publicacao is None or _conexao_publicacao.is_closed:
-        parametros = pika.URLParameters(URL_RABBITMQ)
-        _conexao_publicacao = pika.BlockingConnection(parametros)
+        _conexao_publicacao = _conectar_publicador()
         _canal_publicacao = _conexao_publicacao.channel()
         _canal_publicacao.exchange_declare(
             exchange=EXCHANGE, exchange_type="topic", durable=True
@@ -54,24 +82,49 @@ def _abrir_canal_publicacao():
     return _canal_publicacao
 
 
+def _descartar_publicador():
+    """Joga fora a conexao do publicador, para a proxima tentativa reabrir."""
+    global _conexao_publicacao, _canal_publicacao
+    conexao, _conexao_publicacao, _canal_publicacao = _conexao_publicacao, None, None
+    try:
+        if conexao is not None and conexao.is_open:
+            conexao.close()
+    except Exception:  # noqa: BLE001 - ja estamos descartando a conexao
+        pass
+
+
 def publicar(routing_key, mensagem):
     """Publica um evento na exchange iceibank.eventos.
 
     durable na exchange/fila + delivery_mode Persistent sao o que garante que
     uma mensagem publicada para uma agencia fora do ar nao se perde: ela fica
     gravada no disco do broker ate alguem consumir.
+
+    Uma tentativa extra quando a conexao estava morta: com heartbeat desligado
+    (ver _conectar_publicador), uma conexao perdida nao e mais detectada pelo
+    broker, so pelo basic_publish - e ai o retry evita devolver 502 por causa de
+    um simples salto de rede. Um broker realmente fora do ar continua falhando nas
+    duas tentativas.
     """
+    corpo = json.dumps(mensagem).encode("utf-8")
     with _lock_publicacao:
-        canal = _abrir_canal_publicacao()
-        canal.basic_publish(
-            exchange=EXCHANGE,
-            routing_key=routing_key,
-            body=json.dumps(mensagem).encode("utf-8"),
-            properties=pika.BasicProperties(
-                content_type="application/json",
-                delivery_mode=pika.DeliveryMode.Persistent,
-            ),
-        )
+        for tentativa in (1, 2):
+            try:
+                canal = _abrir_canal_publicacao()
+                canal.basic_publish(
+                    exchange=EXCHANGE,
+                    routing_key=routing_key,
+                    body=corpo,
+                    properties=pika.BasicProperties(
+                        content_type="application/json",
+                        delivery_mode=pika.DeliveryMode.Persistent,
+                    ),
+                )
+                return
+            except (pika.exceptions.AMQPError, OSError):
+                _descartar_publicador()
+                if tentativa == 2:
+                    raise
 
 
 def fechar_publicador():
@@ -122,7 +175,7 @@ def iniciar_consumidor(id_agencia, ao_receber_mensagem):
                     # seria o contrario - nack sem requeue para uma dead-letter
                     # queue, para nao ficar em laco com uma mensagem "venenosa"
                     # (funcionalidade adicional do Sprint 2, Etapa 4).
-                    print(f"[RabbitMQ] erro ao tratar mensagem: {erro}")
+                    print(f"[RabbitMQ] erro ao tratar mensagem: {descrever_erro(erro)}")
                 else:
                     _canal.basic_ack(delivery_tag=metodo.delivery_tag)
 
@@ -146,7 +199,11 @@ def iniciar_consumidor(id_agencia, ao_receber_mensagem):
                 # conexao, nunca o retorno do metodo.
                 conexao.process_data_events(time_limit=0.5)
         except Exception as erro:  # noqa: BLE001
-            print(f"[RabbitMQ] consumidor da agencia {id_agencia} encerrou: {erro}", flush=True)
+            print(
+            f"[RabbitMQ] consumidor da agencia {id_agencia} encerrou: "
+            f"{descrever_erro(erro)}",
+            flush=True,
+        )
         finally:
             if conexao.is_open:
                 conexao.close()
