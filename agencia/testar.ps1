@@ -17,7 +17,7 @@
 #>
 
 param(
-    [ValidateSet("preparar", "transferencia", "resiliencia", "pos", "todas")]
+    [ValidateSet("preparar", "transferencia", "resiliencia", "pos", "timeline", "todas")]
     [string]$Etapa = "todas",
     # 4021 = 4000 + OFFSET 21 (config.py). As tres agencias ficam em
     # PortaBase, PortaBase+1 e PortaBase+2.
@@ -176,6 +176,45 @@ function EtapaPos {
     Mostrar-Filas -Corpo
 }
 
+function EtapaTimeline {
+    Conectar
+
+    Write-Host ""
+    Write-Host "  Cenario da linha do tempo causal: 3 agencias operam, duas transferencias" -ForegroundColor Yellow
+    Write-Host "  atravessam o broker e uma terceira chega na agencia 2 carregando o componente" -ForegroundColor Yellow
+    Write-Host "  da agencia 0 no vetor - que e a prova de que o vetorial guarda causalidade." -ForegroundColor Yellow
+
+    Mostrar-Data "1/6 Criando a conta 0 na agencia 0 (vetor [1,0,0])"
+    Invoke-Api -Agencia 0 -Rota "/contas" -Metodo "POST" -Corpo @{ id = 0; nomeAluno = "Ana"; saldoInicial = 100 } | Out-Null
+
+    Mostrar-Data "2/6 Criando a conta 1 na agencia 1 (vetor [0,1,0] - CONCORRENTE com o anterior)"
+    Invoke-Api -Agencia 1 -Rota "/contas" -Metodo "POST" -Corpo @{ id = 1; nomeAluno = "Bia"; saldoInicial = 0 } | Out-Null
+
+    Mostrar-Data "3/6 Criando a conta 2 na agencia 2 (vetor [0,0,1] - CONCORRENTE com as duas)"
+    Invoke-Api -Agencia 2 -Rota "/contas" -Metodo "POST" -Corpo @{ id = 2; nomeAluno = "Carla"; saldoInicial = 60 } | Out-Null
+
+    Mostrar-Data "4/6 Deposito local na agencia 1 (de onde sai o dinheiro da proxima transferencia)"
+    Invoke-Api -Agencia 1 -Rota "/contas/1/depositar" -Metodo "POST" -Corpo @{ valor = 25 } | Out-Null
+
+    Mostrar-Data "5/6 Transferencia 0 -> 1 (agencia 0 publica, agencia 1 recebe e funde o vetor)"
+    Invoke-Api -Agencia 0 -Rota "/transferencias" -Metodo "POST" -Corpo @{ idOrigem = 0; idDestino = 1; valor = 30 } | Out-Null
+
+    Start-Sleep -Seconds 2
+    Mostrar-Data "6/6 Transferencia 1 -> 2 (o credito na agencia 2 carrega [x,y,0] e vira [x,y,1])"
+    Invoke-Api -Agencia 1 -Rota "/transferencias" -Metodo "POST" -Corpo @{ idOrigem = 1; idDestino = 2; valor = 10 } | Out-Null
+
+    Start-Sleep -Seconds 2
+    Write-Host ""
+    Write-Host "  Saldos finais (confere que os tres creditos assincronos chegaram):" -ForegroundColor Yellow
+    Invoke-Api -Agencia 0 -Rota "/contas/0" | Out-Null
+    Invoke-Api -Agencia 1 -Rota "/contas/1" | Out-Null
+    Invoke-Api -Agencia 2 -Rota "/contas/2" | Out-Null
+
+    Write-Host ""
+    Write-Host "  Agora gere a linha do tempo unificada em outro terminal:" -ForegroundColor Yellow
+    Write-Host "      cd agencia; python mesclar_logs.py" -ForegroundColor Yellow
+}
+
 # ---------------------------------------------------------------- execucao
 
 switch ($Etapa) {
@@ -183,6 +222,7 @@ switch ($Etapa) {
     "transferencia" { EtapaTransferencia }
     "resiliencia" { EtapaResiliencia }
     "pos" { EtapaPos }
+    "timeline" { EtapaTimeline }
     "todas" {
         EtapaPreparar
         EtapaTransferencia
