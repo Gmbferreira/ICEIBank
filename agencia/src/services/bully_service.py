@@ -8,6 +8,10 @@ import src.config as config
 # agencia e tratada como fora do ar (ver pergunta 3 da Parte B em RESPOSTAS.md).
 TIMEOUT_SEGUNDOS = 1.0
 
+# De quanto em quanto tempo cada agencia confere se a lider ainda responde
+# (heartbeat). Trade-off discutido na pergunta 1 da Parte B em RESPOSTAS.md.
+INTERVALO_HEARTBEAT_SEGUNDOS = 3.0
+
 
 class ServicoBully:
     """Eleicao de lider pelo algoritmo de Bully (Garcia-Molina, 1982).
@@ -121,7 +125,55 @@ class ServicoBully:
     def obter_lider_atual(self):
         return self.lider_atual
 
+    async def verificar_lider(self):
+        """Heartbeat: confere se a lider conhecida ainda responde.
+
+        Sem lider conhecida -> inicia eleicao. Eu sou a lider -> nada a fazer.
+        Lider nao respondeu dentro do timeout -> esquece a lider e inicia eleicao.
+        """
+        if self.lider_atual is None:
+            await self.iniciar_eleicao()
+            return
+        if self.lider_atual == self.id_agencia:
+            return
+
+        lider = next((a for a in config.AGENCIAS if a["id"] == self.lider_atual), None)
+        try:
+            if lider is None:
+                raise httpx.HTTPError(f"lider {self.lider_atual} nao esta em config.AGENCIAS")
+            async with httpx.AsyncClient(timeout=TIMEOUT_SEGUNDOS) as cliente:
+                resposta = await cliente.get(f"{lider['url']}/bully/lider")
+                resposta.raise_for_status()
+        except httpx.HTTPError:
+            vetor = self.relogio.evento_local()
+            self.registro.registrar("LIDER_NAO_RESPONDEU", vetor, {
+                "liderAtual": self.lider_atual,
+                "agencia": self.id_agencia,
+            })
+            self.lider_atual = None
+            await self.iniciar_eleicao()
+
+    async def _loop_heartbeat(self, intervalo):
+        # Diferente do setInterval do exemplo em Node: a proxima verificacao so
+        # e agendada depois que a atual termina. Uma verificacao lenta (timeout
+        # de 1 s + eleicao) nunca se sobrepoe a seguinte.
+        while True:
+            await asyncio.sleep(intervalo)
+            try:
+                await self.verificar_lider()
+            except Exception as erro:  # noqa: BLE001
+                # Um erro inesperado numa verificacao nao pode matar o heartbeat
+                # para sempre: registra no terminal e tenta de novo no proximo ciclo.
+                print(f"[Bully] erro no heartbeat: {erro!r}", flush=True)
+
+    def iniciar_heartbeat(self, intervalo=INTERVALO_HEARTBEAT_SEGUNDOS):
+        """Inicia a verificacao periodica da lider em segundo plano."""
+        tarefa = asyncio.create_task(self._loop_heartbeat(intervalo))
+        # Mesmo conjunto das eleicoes: encerrar() tambem cancela o heartbeat.
+        self._tarefas.add(tarefa)
+        tarefa.add_done_callback(self._tarefas.discard)
+
     def encerrar(self):
-        """Cancela eleicoes ainda em andamento quando o servidor desliga."""
+        """Cancela o heartbeat e eleicoes em andamento quando o servidor desliga."""
         for tarefa in list(self._tarefas):
             tarefa.cancel()

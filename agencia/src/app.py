@@ -86,6 +86,9 @@ def create_app():
         # dentro do startup, o servidor so aceitaria conexoes depois de a eleicao
         # terminar, e nao conseguiria responder as eleicoes das outras agencias.
         app.state.bully.agendar_eleicao()
+        # Parte B: a cada poucos segundos, confere se a lider ainda responde e,
+        # se nao, dispara uma nova eleicao sozinha (failover automatico).
+        app.state.bully.iniciar_heartbeat()
         yield
         app.state.bully.encerrar()
         parar_consumidor()
