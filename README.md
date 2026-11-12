@@ -84,6 +84,12 @@ $env:AGENCIA_ID=1; uvicorn src.app:app --port 4022
 $env:AGENCIA_ID=2; uvicorn src.app:app --port 4023
 ```
 
+**Atalho (Sprint 3):** `.\agencia\subir.ps1` faz o mesmo de uma vez: abre uma
+janela do PowerShell por agência, já com `AGENCIA_ID`, porta e `RABBITMQ_URL`
+definidos. A URL é lida do terminal ou de `agencia\.env` (não versionado); se não
+existir, o script pergunta e salva nesse arquivo. Para subir só uma agência (ex.:
+religar a líder no teste de failover): `.\agencia\subir.ps1 -Agencias 2`.
+
 Cada agência imprime no startup a linha de consumo, que confirma que a topologia
 foi declarada:
 
