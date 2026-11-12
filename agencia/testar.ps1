@@ -1,5 +1,6 @@
 <#
     Sprint 2 - roteiro de teste do ICEIBank (Publish/Subscribe via RabbitMQ).
+    Sprint 3 - etapa "lider": consulta /bully/lider nas 3 agencias (eleicao e failover).
 
     Este script existe para nao depender de colar comandos longos no PowerShell:
     no PowerShell 5.1 as aspas duplas de um JSON escrito a mao sao removidas ao
@@ -12,12 +13,13 @@
         .\agencia\testar.ps1 -Etapa transferencia
         .\agencia\testar.ps1 -Etapa resiliencia
         .\agencia\testar.ps1 -Etapa pos
+        .\agencia\testar.ps1 -Etapa lider
 
     Cada etapa imprime Get-Date antes da acao, para o print ter data/hora visivel.
 #>
 
 param(
-    [ValidateSet("preparar", "transferencia", "resiliencia", "pos", "timeline", "todas")]
+    [ValidateSet("preparar", "transferencia", "resiliencia", "pos", "timeline", "lider", "todas")]
     [string]$Etapa = "todas",
     # 4021 = 4000 + OFFSET 21 (config.py). As tres agencias ficam em
     # PortaBase, PortaBase+1 e PortaBase+2.
@@ -215,6 +217,38 @@ function EtapaTimeline {
     Write-Host "      cd agencia; python mesclar_logs.py" -ForegroundColor Yellow
 }
 
+function EtapaLider {
+    # Nao precisa de login: as rotas /bully/* sao entre agencias, sem JWT.
+    Mostrar-Data "Lider atual segundo cada agencia (GET /bully/lider)"
+    $linhas = foreach ($agencia in 0..2) {
+        $porta = $PortaBase + $agencia
+        try {
+            # 127.0.0.1 e nao localhost: no Windows, "localhost" tenta primeiro o IPv6
+            # (::1), onde o uvicorn nao escuta, e so cai no IPv4 depois de ~2 s -
+            # o que estourava o -TimeoutSec e marcava agencias no ar como "fora do ar".
+            $resposta = Invoke-RestMethod -Uri "http://127.0.0.1:$porta/bully/lider" -Method Get -TimeoutSec 2
+            $lider = if ($null -eq $resposta.liderAtual) { "(nenhuma)" } else { $resposta.liderAtual }
+            [pscustomobject]@{ Agencia = $agencia; Porta = $porta; Status = "no ar"; LiderAtual = $lider }
+        }
+        catch {
+            [pscustomobject]@{ Agencia = $agencia; Porta = $porta; Status = "fora do ar"; LiderAtual = "-" }
+        }
+    }
+    $linhas | Format-Table -AutoSize | Out-String | Write-Host
+
+    $noAr = @($linhas | Where-Object { $_.Status -eq "no ar" })
+    $lideres = @($noAr | ForEach-Object { "$($_.LiderAtual)" } | Select-Object -Unique)
+    if ($noAr.Count -eq 0) {
+        Write-Host "  Nenhuma agencia respondeu. Elas estao no ar?" -ForegroundColor Red
+    }
+    elseif ($lideres.Count -eq 1 -and $lideres[0] -ne "(nenhuma)") {
+        Write-Host "  Consenso: as $($noAr.Count) agencias no ar concordam que a lider e a agencia $($lideres[0])." -ForegroundColor Green
+    }
+    else {
+        Write-Host "  Ainda sem consenso (eleicao em andamento?). Espere alguns segundos e rode de novo." -ForegroundColor Yellow
+    }
+}
+
 # ---------------------------------------------------------------- execucao
 
 switch ($Etapa) {
@@ -223,6 +257,7 @@ switch ($Etapa) {
     "resiliencia" { EtapaResiliencia }
     "pos" { EtapaPos }
     "timeline" { EtapaTimeline }
+    "lider" { EtapaLider }
     "todas" {
         EtapaPreparar
         EtapaTransferencia

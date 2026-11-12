@@ -21,3 +21,6 @@ agencia/data/*.jsonl
 .idea/
 Thumbs.db
 desktop.ini
+
+# Roteiro consolidado do Sprint 3 (referencia pessoal, nao versionar)
+SPRINT3_ESCOPO.md

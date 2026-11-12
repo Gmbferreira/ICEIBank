@@ -6,13 +6,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 import src.config as config
-from src.controllers import auth, contas, transferencias
+from src.controllers import auth, bully, contas, transferencias
 from src.services.mensageria import (
     CreditoRecusado,
     fechar_publicador,
     iniciar_consumidor,
     parar_consumidor,
 )
+from src.services.bully_service import ServicoBully
 from src.services.registro_eventos import RegistroEventos
 from src.services.relogio_vetorial import RelogioVetorial
 
@@ -80,7 +81,13 @@ def create_app():
         # O consumidor sobe junto com o servidor: sem ele, esta agencia nao
         # receberia os creditos publicados pelas outras.
         iniciar_consumidor(id_agencia, lambda mensagem: processar_credito_remoto(app, mensagem))
+        # Sprint 3: ao subir, a agencia ja dispara a propria eleicao para descobrir
+        # (ou estabelecer) quem e a lider. Vai em segundo plano: se rodasse aqui
+        # dentro do startup, o servidor so aceitaria conexoes depois de a eleicao
+        # terminar, e nao conseguiria responder as eleicoes das outras agencias.
+        app.state.bully.agendar_eleicao()
         yield
+        app.state.bully.encerrar()
         parar_consumidor()
         fechar_publicador()
 
@@ -100,6 +107,7 @@ def create_app():
     app.state.relogio = RelogioVetorial(id_agencia, config.NUMERO_AGENCIAS)
     app.state.registro = RegistroEventos(f"agencia-{id_agencia}")
     app.state.contas = {}
+    app.state.bully = ServicoBully(id_agencia, app.state.relogio, app.state.registro)
 
     @app.exception_handler(HTTPException)
     async def http_exception_handler(request, exc):
@@ -109,6 +117,7 @@ def create_app():
     app.include_router(auth.router)
     app.include_router(contas.router)
     app.include_router(transferencias.router)
+    app.include_router(bully.router)
     return app
 
 
