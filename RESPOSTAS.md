@@ -867,6 +867,87 @@ declarar a líder morta, em vez de uma; e fazer a própria líder confirmar
 periodicamente que ainda é reconhecida (ou usar mandatos numerados, como na P2),
 para que uma líder "isolada" perceba que foi substituída.
 
+## [Sprint 3] Parte C (seção 7.3)
+
+**Execução de referência.** Saída de `python historico_lideranca.py` sobre os logs
+das duas execuções feitas até aqui (a da Parte A e a da Parte B, com o failover e
+a volta da agência 2). Horários em hora local:
+
+```
+=== Linha do tempo de lideres ===
+A partir de 12/11 18:17:56.172: Agencia 2 e a lider   [lider inicial]
+A partir de 12/11 18:17:56.999: Agencia 2 e a lider   [reafirmacao (ja era a lider)]
+A partir de 12/11 18:17:57.519: Agencia 2 e a lider   [reafirmacao (ja era a lider)]
+A partir de 12/11 19:41:31.572: Agencia 2 e a lider   [lider inicial]
+A partir de 12/11 19:41:32.343: Agencia 2 e a lider   [reafirmacao (ja era a lider)]
+A partir de 12/11 19:41:32.861: Agencia 2 e a lider   [reafirmacao (ja era a lider)]
+A partir de 12/11 19:42:37.011: Agencia 1 e a lider   [TROCA 2 -> 1 (apos queda da lider 2)]
+A partir de 12/11 19:42:38.576: Agencia 1 e a lider   [reafirmacao (ja era a lider)]
+A partir de 12/11 19:49:13.576: Agencia 2 e a lider   [TROCA 1 -> 2 (agencia 2, de ID maior, voltou e tomou a lideranca)]
+
+=== Resumo ===
+Declaracoes de lideranca (TORNOU_LIDER): 9
+  lider inicial (inicio de execucao):   2
+  reafirmacoes (mesma agencia de novo):  5
+  trocas efetivas de lider:              2
+```
+
+A linha do tempo reflete a sequência pedida: líder inicial (2) -> queda -> nova
+líder (1) -> volta da 2, que retoma a liderança. O script do roteiro listaria as 9
+linhas `TORNOU_LIDER` iguais umas às outras; a versão em Python classifica cada uma
+(inicial, reafirmação ou troca), porque sem isso a pergunta abaixo não tem resposta
+direta: 9 declarações não significam 9 trocas.
+
+**P1 - Observando a saída do script, quantas vezes a liderança mudou de mãos durante
+a "tempestade" de eleições da subida inicial (Parte A), antes de estabilizar? Isso
+tem algum custo real para o sistema (rede, tempo), mesmo não afetando o resultado
+final?**
+
+**Nenhuma vez.** Nas duas subidas registradas (18:17 e 19:41), a agência 2 se
+declarou líder três vezes - uma na própria eleição de startup e mais uma para cada
+eleição que recebeu das agências 0 e 1 -, mas a liderança nunca saiu dela: são
+**3 declarações, 0 trocas**. Isso aconteceu porque as três agências subiram ao mesmo
+tempo pelo `subir.ps1`, e a 2 já estava no ar quando as menores perguntaram. Se as
+agências subissem uma de cada vez, em ordem crescente de ID, aí sim a liderança
+mudaria de mãos durante a subida (0 -> 1 -> 2).
+
+**Mesmo sem trocas, a tempestade tem custo.** Contando os eventos da subida da
+Parte B nos logs:
+
+| | Na tempestade | Mínimo necessário |
+|---|---|---|
+| Eleições iniciadas (`ELEICAO_INICIADA`) | 5 (3 no startup + 2 repetidas pela agência 2) | 3 |
+| Mensagens de eleição (`POST /bully/eleicao`) | 3 | 3 |
+| Declarações (`TORNOU_LIDER`) | 3 | 1 |
+| Anúncios de coordenador (`POST /bully/coordenador`) | 6 | 2 |
+| Tempo até o último anúncio | ~2,2 s | - |
+
+- **Rede:** 9 requisições HTTP para chegar a um resultado que 5 resolveriam - os 4
+  anúncios extras dizem exatamente o que as agências já sabiam (`liderId: 2`). Com 3
+  agências é pouco, mas o Bully troca, no pior caso, um número de mensagens que
+  cresce com o **quadrado** do número de processos: cada agência pergunta a todas as
+  maiores e cada reafirmação anuncia para todas as outras.
+- **Tempo:** entre a subida (`19:41:30.951`) e o último anúncio (`19:41:33.133`)
+  passaram ~2,2 s. Durante uma parte desse intervalo as agências 0 e 1 ainda não
+  conheciam nenhuma líder (`liderAtual = null` até o primeiro anúncio chegar, ~0,9 s
+  depois da subida). Neste sprint isso só significa um painel momentaneamente vazio;
+  no Sprint 4, qualquer operação que precise da coordenadora teria de esperar a
+  eleição terminar.
+- **Tempo, no pior caso:** na Parte A, ainda com as URLs em `localhost`, a mesma
+  tempestade levou ~3,9 s (`21:17:54.494` -> `21:17:58.352`) e um dos 6 anúncios não
+  chegou - cada mensagem extra é mais uma chance de esbarrar no timeout.
+- **Log e relógio:** cada mensagem gera eventos no `.jsonl` e avança o relógio
+  vetorial (a agência 2 saiu da subida com a própria posição em 14, quase tudo
+  só de eleições). Mais eventos significam logs maiores e mais ruído para quem lê a
+  linha do tempo - foi justamente por isso que o script precisou classificar as
+  declarações.
+
+O resultado final não muda (o maior ID sempre vence), mas a tempestade mostra que o
+Bully otimiza simplicidade e garantia de convergência, não economia de mensagens.
+Uma forma simples de reduzir o custo seria a agência que já é líder responder a uma
+eleição recebida apenas reenviando o anúncio para quem perguntou, em vez de refazer
+a eleição inteira e anunciar para todas.
+
 ## [Sprint 3] Notas de implementação
 
 - **Bully em asyncio, sem lock:** as rotas `/bully/*` são `async def` e as eleições e
