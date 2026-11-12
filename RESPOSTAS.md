@@ -1,4 +1,4 @@
-# RESPOSTAS - ICEIBank (Sprint 1 e Sprint 2)
+# RESPOSTAS - ICEIBank (Sprints 1, 2 e 3)
 
 Aluno: Guilherme Martini Brina Ferreira
 Matrícula/RA 1153221
@@ -7,6 +7,10 @@ Matrícula/RA 1153221
 > forma relevante entre eles, marco o estado antigo como **[Sprint 1]** e o
 > estado atual como **[Sprint 2]**, para ficar explícito o que a mensageria e o
 > relógio vetorial resolveram.
+>
+> As respostas do **Sprint 3** ficam reunidas na seção "Sprint 3", no fim do
+> documento: a numeração das partes recomeça no roteiro novo (há uma "Parte B"
+> em cada sprint), então mantê-las juntas evita confusão.
 
 ## Resumo do que foi entregue (estado atual - Sprint 2)
 
@@ -582,3 +586,138 @@ que o roteiro pede (campo indicando qual agência é a porta de entrada).
 - **Escrita dos logs com `flush=True`:** os eventos precisam estar no arquivo antes
   que o processo possa morrer por falta de memória ou por um restart durante o
   teste; sem flush, os últimos eventos do cenário de resiliência sumiriam.
+
+---
+
+# Sprint 3 - Eleição de líder (Bully), app Flutter e offline-first
+
+## [Sprint 3] Parte A (seção 5.5)
+
+**Execução de referência.** As respostas abaixo usam a subida real das 3 agências
+(`agencia\subir.ps1`, as três iniciadas no mesmo instante). Eventos de eleição
+extraídos dos logs `agencia/data/eventos-agencia-*.jsonl`, em ordem de hora:
+
+```
+21:17:54.494 agencia-0 [1, 0, 0]   ELEICAO_INICIADA {'idAgencia': 0}
+21:17:54.494 agencia-1 [0, 1, 0]   ELEICAO_INICIADA {'idAgencia': 1}
+21:17:54.494 agencia-2 [0, 0, 1]   ELEICAO_INICIADA {'idAgencia': 2}
+21:17:56.172 agencia-2 [0, 0, 2]   TORNOU_LIDER     {'idAgencia': 2}
+21:17:56.461 agencia-1 [2, 3, 0]   ELEICAO_RECEBIDA {'de': 0, 'minhaId': 1}
+21:17:56.749 agencia-2 [3, 0, 4]   ELEICAO_RECEBIDA {'de': 0, 'minhaId': 2}
+21:17:56.751 agencia-2 [3, 0, 5]   ELEICAO_INICIADA {'idAgencia': 2}
+21:17:56.999 agencia-2 [3, 0, 6]   TORNOU_LIDER     {'idAgencia': 2}
+21:17:57.275 agencia-2 [3, 2, 8]   ELEICAO_RECEBIDA {'de': 1, 'minhaId': 2}
+21:17:57.277 agencia-2 [3, 2, 9]   ELEICAO_INICIADA {'idAgencia': 2}
+21:17:57.519 agencia-2 [3, 2, 10]  TORNOU_LIDER     {'idAgencia': 2}
+21:17:58.071 agencia-1 [3, 4, 12]  LIDER_ANUNCIADO  {'liderId': 2, 'agencia': 1}
+21:17:58.080 agencia-0 [4, 0, 7]   LIDER_ANUNCIADO  {'liderId': 2, 'agencia': 0}
+21:17:58.082 agencia-0 [5, 2, 11]  LIDER_ANUNCIADO  {'liderId': 2, 'agencia': 0}
+21:17:58.349 agencia-1 [3, 5, 13]  LIDER_ANUNCIADO  {'liderId': 2, 'agencia': 1}
+21:17:58.352 agencia-1 [3, 6, 14]  LIDER_ANUNCIADO  {'liderId': 2, 'agencia': 1}
+```
+
+Resultado final (`testar.ps1 -Etapa lider`): as 3 agências no ar, todas com
+`liderAtual = 2`.
+
+**P1 - Por que o algoritmo de Bully sempre elege o processo de maior ID, e não o de
+menor? O resultado seria diferente (mas ainda assim correto) se a regra fosse
+invertida?**
+
+"Maior ID" é uma **convenção**, não uma necessidade. O que o algoritmo precisa é de
+um critério de desempate **total e conhecido por todos**: cada agência sabe o ID de
+todas as outras (`config.AGENCIAS`), então, olhando só para quem está vivo, todas
+chegam sozinhas à mesma conclusão sobre quem deve vencer. O nome "bully" (valentão)
+vem justamente disso: o processo "mais forte" sempre toma a liderança dos menores.
+
+Se a regra fosse invertida (vence o **menor** ID ativo), o algoritmo continuaria
+correto, só que espelhado: a eleição seria enviada para os IDs menores, e quem não
+ouvisse resposta de ninguém menor se declararia líder. Na nossa execução a líder
+seria a agência 0 em vez da 2 - **resultado diferente, mas igualmente correto**,
+porque continua havendo uma única líder com que todas concordam. O que quebraria o
+algoritmo não é a direção da regra, e sim um critério que as agências pudessem
+avaliar de forma diferente (por exemplo, "a que tiver menos carga agora", que muda
+com o tempo e cada uma mede de um jeito). Em sistemas reais, o ID costuma codificar
+uma prioridade (a máquina mais robusta recebe o maior ID), e o "maior vence" passa a
+ter um significado prático.
+
+**P2 - No passo 4 da tarefa, você deve ter visto mais de uma agência declarar
+`TORNOU_LIDER` durante a subida, antes de convergir. Isso é um bug, ou um
+comportamento esperado do algoritmo?**
+
+É **comportamento esperado**. Na nossa execução, o que se repetiu não foram
+agências diferentes se declarando líder, e sim a **mesma agência (2) se declarando
+três vezes**. Pelo log acima:
+
+1. As três agências subiram no mesmo milissegundo (`21:17:54.494`) e cada uma
+   iniciou a própria eleição, como manda o `app.py` no startup.
+2. A agência 2 não tem ninguém com ID maior: venceu sozinha
+   (`TORNOU_LIDER [0, 0, 2]`).
+3. Em seguida chegou a eleição que a agência 0 tinha mandado para ela
+   (`ELEICAO_RECEBIDA de 0`). A regra 4 do Bully obriga quem recebe uma eleição a
+   responder e iniciar a própria - então a 2 refez a eleição e se declarou de novo
+   (`[3, 0, 6]`).
+4. O mesmo aconteceu com a eleição da agência 1 (`ELEICAO_RECEBIDA de 1` ->
+   `TORNOU_LIDER [3, 2, 10]`).
+
+A agência 2 não sabe que "já é líder e todos sabem disso": cada eleição recebida
+pode significar que alguém perdeu a líder de vista, então ela reafirma. Isso gera
+anúncios repetidos (a agência 1 registrou 3 `LIDER_ANUNCIADO`, a agência 0
+registrou 2 - um dos anúncios não foi registrado por ela, provavelmente por não ter
+chegado dentro do timeout de 1 s), mas o conteúdo é sempre o mesmo, `liderId: 2`, e
+a redundância até ajudou: mesmo com um anúncio a menos, a agência 0 convergiu.
+
+As agências 0 e 1 **não** chegaram a se declarar líder nesta execução porque a 2 já
+estava no ar quando elas perguntaram, e respondeu. Também se vê no log o efeito da
+flag `eleicao_em_andamento`: a agência 1 recebeu a eleição da 0 (`21:17:56.461`)
+enquanto a própria eleição ainda esperava resposta da 2, e por isso não abriu uma
+segunda eleição em paralelo (não há `ELEICAO_INICIADA` dela logo depois).
+
+Se as agências subissem em momentos diferentes (por exemplo, 0 e 1 primeiro e a 2
+alguns segundos depois), veríamos o caso que o roteiro descreve: a agência 1 se
+declararia líder, e a liderança mudaria de mãos quando a 2 subisse e iniciasse a
+própria eleição. Isso também não seria bug: o Bully só garante que o resultado
+**final** é o maior ID ativo; enquanto o conjunto de agências ativas ainda está
+mudando, líderes provisórios são esperados. Seria bug se o sistema terminasse com
+duas líderes diferentes, ou com uma líder que não fosse a de maior ID - o que não
+aconteceu: o `testar.ps1 -Etapa lider` mostrou as três concordando com a 2.
+
+**P3 - O endpoint `/bully/eleicao` não tem nenhuma autenticação. Qualquer processo
+que descubra a URL de uma agência pode disparar uma eleição nela. Isso é um problema
+de segurança real para este projeto? Por quê, ou por que não?**
+
+**Neste projeto, hoje, o risco é baixo - mas a brecha é real e cresce no Sprint 4.**
+
+Por que é baixo agora:
+
+- As agências escutam só em `127.0.0.1` (o uvicorn mostra `Uvicorn running on
+  http://127.0.0.1:4023`): de fora da máquina, ninguém alcança as rotas `/bully/*`.
+  Quem consegue chamá-las já está dentro da máquina, onde poderia fazer coisa pior.
+- Neste sprint a líder é **só informativa**: nenhuma operação bancária depende dela.
+  Uma eleição forçada não move dinheiro nem altera saldo.
+- Disparar uma eleição nem muda o resultado: ela sempre converge para o maior ID
+  ativo. O efeito de um abuso de `/bully/eleicao` é tráfego extra (uma "tempestade"
+  como a da subida a cada chamada), ou seja, um problema de negação de serviço, não
+  de integridade.
+
+Por que a brecha é real:
+
+- O endpoint mais perigoso é o **`/bully/coordenador`**, que também não tem
+  autenticação: `receber_coordenador` aceita qualquer `liderId` sem conferir nada.
+  Um processo malicioso pode anunciar `liderId: 0` com as três agências vivas, e as
+  agências passam a acreditar nisso - o heartbeat da Parte B só verifica se a líder
+  **responde**, e a agência 0 responde, então a líder falsa se mantém.
+- O campo `vetorEnvio` também é confiado sem validação: um vetor forjado como
+  `[999, 999, 999]` é incorporado pelo `ao_receber` (fusão por `max`) e "infla" o
+  relógio da agência para sempre, bagunçando a ordem causal dos logs.
+- No **Sprint 4** a líder vai coordenar as transações distribuídas (2PC). Aí, quem
+  conseguir eleger ou anunciar uma líder passa a decidir quem coordena commits de
+  dinheiro - deixa de ser informativo.
+
+Mitigações proporcionais ao projeto: manter as agências restritas a `127.0.0.1` /
+rede interna; exigir um segredo compartilhado entre agências (um cabeçalho com token
+de serviço, separado do JWT dos clientes) nas rotas `/bully/*`; e validar o conteúdo
+das mensagens (rejeitar `liderId` que não esteja em `config.AGENCIAS` e vetores com
+tamanho errado). Em produção, o padrão seria TLS mútuo (mTLS) entre os serviços.
+Isso segue o mesmo raciocínio do domínio de confiança do consumidor do RabbitMQ
+(Sprint 2): mensagens entre agências não carregam JWT porque vêm de dentro do
+sistema, mas isso só é seguro enquanto o canal for de fato restrito às agências.
