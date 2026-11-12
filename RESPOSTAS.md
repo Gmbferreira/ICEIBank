@@ -721,3 +721,168 @@ tamanho errado). Em produção, o padrão seria TLS mútuo (mTLS) entre os servi
 Isso segue o mesmo raciocínio do domínio de confiança do consumidor do RabbitMQ
 (Sprint 2): mensagens entre agências não carregam JWT porque vêm de dentro do
 sistema, mas isso só é seguro enquanto o canal for de fato restrito às agências.
+
+## [Sprint 3] Parte B (seção 6.4)
+
+**Execução de referência.** Agências reiniciadas já com o heartbeat (intervalo de
+3 s, timeout de 1 s) e com as URLs entre agências em `127.0.0.1` (ver "Notas do
+Sprint 3"). Depois da convergência inicial para a agência 2, a janela da agência 2
+foi fechada. Eventos do failover, extraídos dos `.jsonl`:
+
+```
+22:41:33.133 agencia-1 [4, 6, 14]   LIDER_ANUNCIADO     {'liderId': 2, 'agencia': 1}   <- estável
+   ... janela da agência 2 fechada ...
+22:42:35.724 agencia-1 [4, 7, 14]   LIDER_NAO_RESPONDEU {'liderAtual': 2, 'agencia': 1}
+22:42:35.725 agencia-1 [4, 8, 14]   ELEICAO_INICIADA    {'idAgencia': 1}
+22:42:36.721 agencia-0 [7, 2, 12]   LIDER_NAO_RESPONDEU {'liderAtual': 2, 'agencia': 0}
+22:42:36.722 agencia-0 [8, 2, 12]   ELEICAO_INICIADA    {'idAgencia': 0}
+22:42:37.011 agencia-1 [4, 10, 14]  TORNOU_LIDER        {'idAgencia': 1}
+22:42:37.265 agencia-1 [9, 12, 14]  ELEICAO_RECEBIDA    {'de': 0, 'minhaId': 1}
+22:42:37.266 agencia-1 [9, 13, 14]  ELEICAO_INICIADA    {'idAgencia': 1}
+22:42:37.563 agencia-0 [11, 11, 14] LIDER_ANUNCIADO     {'liderId': 1, 'agencia': 0}
+22:42:38.576 agencia-1 [9, 16, 14]  TORNOU_LIDER        {'idAgencia': 1}
+22:42:38.864 agencia-0 [12, 17, 14] LIDER_ANUNCIADO     {'liderId': 1, 'agencia': 0}
+```
+
+Sem nenhuma intervenção manual, as duas agências restantes perceberam a queda,
+elegeram a agência 1 (a de maior ID entre as vivas) e o `testar.ps1 -Etapa lider`
+confirmou o consenso das duas na líder 1, com a 2 "fora do ar".
+
+**P1 - O que aconteceria se o intervalo do heartbeat (`intervaloMs`) fosse muito
+curto (ex.: 100ms)? E se fosse muito longo (ex.: 60 segundos)?**
+
+O intervalo define o **tempo máximo para perceber a queda**. No pior caso, a líder
+cai logo depois de uma verificação bem-sucedida, e a próxima só acontece um
+intervalo depois - e ainda leva até o timeout (1 s) para concluir que ela não
+respondeu. Com 3 s, isso dá no máximo uns 4 s de "cegueira", mais o tempo da
+eleição. No log, as duas agências detectaram a queda com 1 s de diferença entre si
+(`35.724` e `36.721`): cada uma tem o próprio ciclo de heartbeat, iniciado no
+momento em que subiu, então elas não verificam em sincronia.
+
+- **Muito curto (100 ms):** cada agência que não é líder faz 10 `GET /bully/lider`
+  por segundo - com 3 agências, 20 requisições por segundo só de verificação, mais as
+  linhas correspondentes no log de acesso de cada processo, sem nenhum ganho real
+  (a líder não cai 10 vezes por segundo). Pior que o custo é a **sensibilidade**:
+  com verificações tão frequentes, qualquer soluço momentâneo (uma pausa do processo,
+  um pico de CPU, uma resposta mais lenta) vira "líder caiu" e dispara uma eleição
+  desnecessária, que por sua vez gera a sua própria rajada de mensagens. O intervalo
+  também ficaria menor que o timeout (1 s): no exemplo em Node, com `setInterval`,
+  as verificações se acumulariam umas sobre as outras enquanto a anterior ainda
+  espera resposta. Na minha implementação isso não ocorre, porque o loop
+  (`_loop_heartbeat`) só agenda a próxima verificação depois que a atual termina -
+  mas o intervalo efetivo passaria a ser ditado pelo timeout, não pelo parâmetro.
+- **Muito longo (60 s):** a rede fica tranquila, mas o sistema pode passar **até um
+  minuto** acreditando numa líder morta. Neste sprint isso só deixa o painel do app
+  desatualizado; no Sprint 4, com a líder coordenando o 2PC, seria um minuto de
+  transações entre agências paradas, esperando um coordenador que não existe mais.
+
+O ponto de equilíbrio é um intervalo bem maior que a latência normal e que o
+timeout (para não gerar falsos positivos), mas pequeno o bastante para que o tempo
+de detecção seja aceitável para quem depende da líder. Os 3 s do roteiro ficam
+nessa faixa para uma rede local.
+
+**P2 - A agência que você derrubou e subiu de novo pode, dependendo do ID dela,
+"tomar" a liderança de volta mesmo que a eleição atual estivesse funcionando bem.
+Isso é desejável? Que problema prático isso pode causar em um sistema real?**
+
+É exatamente o que o Bully faz por definição: ao subir, a agência 2 chama
+`agendar_eleicao()` no startup (`app.py`), não encontra ninguém com ID maior, se
+declara líder (`TORNOU_LIDER`) e anuncia isso às outras, que aceitam o anúncio sem
+questionar (`receber_coordenador`). A liderança troca de mãos de novo (1 -> 2), mesmo
+com a agência 1 liderando sem nenhum problema. Foi o que aconteceu ao religar a
+agência 2 com `subir.ps1 -Agencias 2`, uns 6 minutos depois do failover:
+
+```
+22:49:13.216 agencia-2 [0, 0, 1]    ELEICAO_INICIADA {'idAgencia': 2}
+22:49:13.576 agencia-2 [0, 0, 2]    TORNOU_LIDER     {'idAgencia': 2}
+22:49:13.830 agencia-0 [13, 17, 14] LIDER_ANUNCIADO  {'liderId': 2, 'agencia': 0}
+22:49:13.841 agencia-1 [9, 19, 14]  LIDER_ANUNCIADO  {'liderId': 2, 'agencia': 1}
+```
+
+Em menos de 1 s a agência 1 deixou de ser líder, sem ter falhado. O log também mostra
+um efeito colateral do reinício: o relógio vetorial da agência 2 voltou a zero
+(`[0, 0, 1]`), mas as outras já tinham visto a posição 2 chegar a 14. Pela fusão por
+`max`, os novos eventos da agência 2 (posição 2 = 2, 3, 4...) ficam "escondidos"
+atrás do 14 até ela ultrapassá-lo - o relógio não percebe que houve um processo novo.
+
+**Na maioria dos casos isso não é desejável.** A troca não corrige nenhuma falha -
+ela troca uma líder saudável por outra, só porque a nova tem ID maior. Problemas
+práticos:
+
+- **Troca no meio de uma operação.** No Sprint 4 a líder vai coordenar o 2PC. Se a
+  troca acontecer depois que a líder antiga mandou o "prepare" e antes de mandar o
+  "commit", as agências participantes ficam esperando uma decisão de um coordenador
+  que deixou de ser líder, e a líder nova não sabe que aquela transação existe. O
+  resultado é uma transação travada (ou, sem cuidado, decidida duas vezes).
+- **Instabilidade em cascata.** Uma agência de ID alto que reinicia em loop (falha
+  intermitente) provoca uma troca de liderança a cada vez que volta e outra a cada
+  vez que cai - o sistema passa mais tempo trocando de líder do que trabalhando.
+- **Custo de cada troca.** Cada eleição é uma rajada de mensagens e de eventos de
+  log (no failover acima, a agência 1 chegou a se declarar líder duas vezes, uma para
+  cada eleição iniciada).
+
+Alternativas usadas na prática: ao subir, a agência **pergunta primeiro** se já existe
+uma líder (`GET /bully/lider` em qualquer outra) e, se existir, entra como seguidora
+em vez de iniciar uma eleição; ou o sistema usa **mandatos numerados** (como o
+"term" do Raft), em que uma líder só é substituída quando falha, e não quando aparece
+alguém "maior". A troca preemptiva só faz sentido quando o ID realmente representa
+algo melhor (por exemplo, a máquina mais robusta), e mesmo assim de preferência num
+momento sem operações em andamento.
+
+**P3 - O `TIMEOUT_MS` de 1 segundo é usado tanto para detectar uma agência fora do ar
+quanto para decidir se alguém respondeu a uma eleição. O que aconteceria se a rede
+estivesse genuinamente lenta e isso ultrapassasse 1 segundo?**
+
+O algoritmo **não consegue distinguir "lenta" de "morta"**: para ele, qualquer
+resposta que demore mais de 1 s equivale a não ter resposta. Com uma líder viva,
+porém lenta:
+
+1. O heartbeat das outras agências estoura o timeout, registra
+   `LIDER_NAO_RESPONDEU` e inicia uma eleição - um **falso positivo**.
+2. A eleição envia `ELEICAO` para a líder lenta, que também não responde a tempo.
+   Então uma agência de ID menor conclui que ninguém maior está vivo e se declara
+   líder.
+3. Mas a líder original continua achando que é a líder, porque ela **nunca
+   verifica a si mesma** (`verificar_lider` retorna logo quando `lider_atual ==
+   id_agencia`). Por um tempo há **duas agências se considerando líder** (o
+   chamado *split-brain*).
+4. A situação tende a se corrigir sozinha: a requisição de eleição que "estourou o
+   timeout" do lado de quem enviou ainda chega à líder lenta, que a processa
+   (`receber_eleicao`), refaz a própria eleição e se anuncia de novo. A liderança
+   volta para ela - até o próximo atraso, que repete o ciclo. Numa rede
+   persistentemente lenta, o resultado é uma liderança que fica oscilando.
+
+Neste projeto vimos uma versão real disso. Na Parte A, com as URLs ainda em
+`localhost`, a resolução do Windows tentava primeiro o IPv6 (`::1`), onde o uvicorn
+não escuta, antes de cair no IPv4 - um atraso de quase 2 s, maior que o timeout. O
+efeito apareceu nos logs: a agência 0 registrou só 2 dos 3 anúncios da líder, e o
+`testar.ps1` (com `-TimeoutSec 2`) marcava agências vivas como fora do ar. Depois da
+troca para `127.0.0.1`, na execução desta Parte B, as agências 0 e 1 registraram
+os 3 anúncios cada uma, e nenhum `LIDER_NAO_RESPONDEU` apareceu enquanto as três
+estavam no ar.
+
+O que reduziria o problema: um timeout calibrado pela latência real da rede (e
+configurável, em vez de fixo no código); exigir **várias falhas seguidas** antes de
+declarar a líder morta, em vez de uma; e fazer a própria líder confirmar
+periodicamente que ainda é reconhecida (ou usar mandatos numerados, como na P2),
+para que uma líder "isolada" perceba que foi substituída.
+
+## [Sprint 3] Notas de implementação
+
+- **Bully em asyncio, sem lock:** as rotas `/bully/*` são `async def` e as eleições e
+  o heartbeat são tarefas asyncio no event loop do uvicorn. Assim `lider_atual` só é
+  alterado por uma thread e dispensa o `threading.Lock` sugerido no roteiro para
+  Python. O relógio vetorial, compartilhado com a thread do consumidor do RabbitMQ,
+  continua com a lock própria.
+- **A rota `/bully/eleicao` responde antes da eleição terminar:** a própria eleição
+  da agência é disparada em segundo plano (`agendar_eleicao`). Se a rota esperasse,
+  ela consultaria as agências maiores e a resposta passaria de 1 s, e quem perguntou
+  acharia que esta agência caiu.
+- **Heartbeat sem sobreposição:** diferente do `setInterval` do exemplo em Node, o
+  loop só agenda a próxima verificação depois que a atual termina, e um erro numa
+  verificação não encerra o heartbeat.
+- **URLs entre agências em `127.0.0.1`:** ver P3 da Parte B. O frontend continua
+  usando `localhost`, porque o navegador não tem o timeout curto do Bully.
+- **`agencia/subir.ps1`:** abre uma janela por agência (logs separados para as
+  evidências, e derrubar uma agência é fechar a janela). A URL do RabbitMQ fica em
+  `agencia/.env`, fora do Git.
