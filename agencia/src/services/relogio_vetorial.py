@@ -1,5 +1,7 @@
 import threading
 
+from src.services.comparar_vetores import comparar_vetores
+
 
 class RelogioVetorial:
     """Relogio vetorial: um contador por agencia, comparavel componente a componente.
@@ -46,3 +48,46 @@ class RelogioVetorial:
                 self.vetor[i] = max(self.vetor[i], vetor_recebido[i])
             self.vetor[self.id_agencia] += 1
             return list(self.vetor)
+
+    # ------------------------------------------------------------ Sprint 3
+
+    def obter_vetor_atual(self):
+        """Le o vetor SEM incrementa-lo (ler nao e um evento).
+
+        Usado pela consulta de saldo: o app guarda esse vetor e o devolve depois,
+        ao sincronizar uma operacao feita offline.
+        """
+        with self._lock:
+            return list(self.vetor)
+
+    def executar_se_atual(self, vetor_conhecido, operacao):
+        """Compara e aplica de forma atomica (sincronizacao offline-first).
+
+        Dentro da lock do relogio:
+          - se vetor_conhecido == vetor atual, nada aconteceu na agencia desde a
+            leitura do app: executa `operacao()` e registra o evento local
+            (incrementa a propria posicao);
+          - senao, nao executa nada.
+
+        Devolve (relacao, vetor): a relacao vetor_conhecido x vetor atual
+        ("IGUAIS", "ANTES", "DEPOIS" ou "CONCORRENTES") e o vetor resultante.
+
+        Por que comparar e aplicar juntos: no exemplo em Node (uma thread so) a
+        comparacao e a aplicacao em sequencia sao seguras. Aqui as rotas "def"
+        rodam numa pool de threads e o consumidor do RabbitMQ em outra thread:
+        entre comparar e aplicar, um deposito concorrente poderia avancar o vetor,
+        e a operacao offline seria aplicada as cegas - exatamente o que este
+        endpoint existe para impedir. Como TODO evento da agencia incrementa o
+        vetor passando por esta mesma lock, comparar e incrementar aqui dentro
+        fecha essa janela.
+
+        Se `operacao()` levantar excecao (ex.: saldo insuficiente), o vetor nao e
+        incrementado e a excecao sobe para quem chamou.
+        """
+        with self._lock:
+            relacao = comparar_vetores(vetor_conhecido, self.vetor)
+            if relacao != "IGUAIS":
+                return relacao, list(self.vetor)
+            operacao()
+            self.vetor[self.id_agencia] += 1
+            return relacao, list(self.vetor)

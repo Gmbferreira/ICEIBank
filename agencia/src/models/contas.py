@@ -26,3 +26,16 @@ class TransferenciaRequest(BaseModel):
 class LoginRequest(BaseModel):
     usuario: str
     senha: str
+
+
+class SincronizarRequest(BaseModel):
+    """Operacao feita offline pelo app, enviada ao reconectar (Sprint 3, Parte E).
+
+    tipo:           "DEPOSITO" ou "SAQUE" (validado no controller, para devolver
+                    400 no formato {"erro": ...} em vez do 422 do pydantic).
+    vetorConhecido: o vetorAtual que o app tinha na ultima leitura da conta.
+    """
+
+    tipo: str
+    valor: float
+    vetorConhecido: list[int]

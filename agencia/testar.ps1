@@ -1,6 +1,7 @@
 <#
     Sprint 2 - roteiro de teste do ICEIBank (Publish/Subscribe via RabbitMQ).
     Sprint 3 - etapa "lider": consulta /bully/lider nas 3 agencias (eleicao e failover).
+    Sprint 3 - etapa "sincronizar": conflito offline-first via relogio vetorial (409).
 
     Este script existe para nao depender de colar comandos longos no PowerShell:
     no PowerShell 5.1 as aspas duplas de um JSON escrito a mao sao removidas ao
@@ -14,12 +15,13 @@
         .\agencia\testar.ps1 -Etapa resiliencia
         .\agencia\testar.ps1 -Etapa pos
         .\agencia\testar.ps1 -Etapa lider
+        .\agencia\testar.ps1 -Etapa sincronizar
 
     Cada etapa imprime Get-Date antes da acao, para o print ter data/hora visivel.
 #>
 
 param(
-    [ValidateSet("preparar", "transferencia", "resiliencia", "pos", "timeline", "lider", "todas")]
+    [ValidateSet("preparar", "transferencia", "resiliencia", "pos", "timeline", "lider", "sincronizar", "todas")]
     [string]$Etapa = "todas",
     # 4021 = 4000 + OFFSET 21 (config.py). As tres agencias ficam em
     # PortaBase, PortaBase+1 e PortaBase+2.
@@ -249,6 +251,70 @@ function EtapaLider {
     }
 }
 
+function Invoke-Sincronizar {
+    # Igual ao Invoke-Api, mas devolve tambem o CORPO da resposta de erro: no
+    # 409 e ele que traz o vetorAtual e a contaAtual (o Invoke-Api so devolve $null).
+    param([int]$Agencia, [int]$IdConta, [string]$Tipo, [double]$ValorOp, $VetorConhecido)
+    $url = "http://localhost:$($PortaBase + $Agencia)/contas/$IdConta/sincronizar"
+    $corpo = @{ tipo = $Tipo; valor = $ValorOp; vetorConhecido = @($VetorConhecido) } | ConvertTo-Json -Compress
+    Write-Host "  -> POST $url"
+    Write-Host "     corpo: $corpo"
+    try {
+        $resposta = Invoke-RestMethod -Uri $url -Method Post -ContentType "application/json" `
+            -Headers @{ Authorization = "Bearer $($script:TOKEN)" } -Body $corpo
+        Write-Host "     HTTP 200 - operacao aplicada:" -ForegroundColor Green
+        Write-Host ($resposta | ConvertTo-Json -Depth 5) -ForegroundColor Green
+        return @{ Status = 200; Corpo = $resposta }
+    }
+    catch {
+        $status = Get-StatusCode $_
+        $detalhe = $_.ErrorDetails.Message
+        $corpoErro = $null
+        if ($detalhe) { try { $corpoErro = $detalhe | ConvertFrom-Json } catch { } }
+        $cor = if ($status -eq 409) { "Yellow" } else { "Red" }
+        Write-Host "     HTTP $status - resposta:" -ForegroundColor $cor
+        if ($corpoErro) { Write-Host ($corpoErro | ConvertTo-Json -Depth 5) -ForegroundColor $cor }
+        else { Write-Host "     $($_.Exception.Message)" -ForegroundColor $cor }
+        return @{ Status = $status; Corpo = $corpoErro }
+    }
+}
+
+function EtapaSincronizar {
+    # Sprint 3, Parte E (tarefa 9.5): a agencia recusa uma operacao offline
+    # desatualizada (409) e aceita a mesma operacao com o vetor atualizado (200).
+    # Conta 3 na agencia 0 (3 % 3 = 0), para nao mexer nas contas 0/1/2 dos outros cenarios.
+    Conectar
+    $v = if ($Valor -gt 0) { $Valor } else { 20 }
+
+    Mostrar-Data "1/5 Criando a conta 3 na agencia 0 (HTTP 409 'ja existe' aqui e normal)"
+    Invoke-Api -Agencia 0 -Rota "/contas" -Metodo "POST" -Corpo @{ id = 3; nomeAluno = "Dani"; saldoInicial = 100 } -Silencioso | Out-Null
+
+    Mostrar-Data "2/5 App le o saldo e guarda o vetorAtual (o 'vetorConhecido' da operacao offline)"
+    $leitura = Invoke-Api -Agencia 0 -Rota "/contas/3"
+    if ($null -eq $leitura) { exit 1 }
+    $vetorAntigo = @($leitura.vetorAtual)
+    Write-Host "     vetor guardado pelo app: [$($vetorAntigo -join ', ')]" -ForegroundColor Cyan
+
+    Mostrar-Data "3/5 Enquanto o app esta 'offline', um deposito de 50 acontece por outro caminho"
+    Invoke-Api -Agencia 0 -Rota "/contas/3/depositar" -Metodo "POST" -Corpo @{ valor = 50 } | Out-Null
+
+    Mostrar-Data "4/5 App reconecta e sincroniza um SAQUE de $v com o vetor ANTIGO - esperado HTTP 409"
+    $conflito = Invoke-Sincronizar -Agencia 0 -IdConta 3 -Tipo "SAQUE" -ValorOp $v -VetorConhecido $vetorAntigo
+    if ($conflito.Status -ne 409 -or $null -eq $conflito.Corpo) {
+        Write-Host "  Esperava HTTP 409 com o corpo do conflito. Interrompendo." -ForegroundColor Red
+        exit 1
+    }
+    $vetorNovo = @($conflito.Corpo.vetorAtual)
+    Write-Host "  Conflito detectado: vetor conhecido [$($vetorAntigo -join ', ')] x atual [$($vetorNovo -join ', ')]." -ForegroundColor Yellow
+    Write-Host "  A operacao NAO foi aplicada; a agencia devolveu o estado real da conta." -ForegroundColor Yellow
+
+    Mostrar-Data "5/5 Sincronizando de novo com o vetorAtual devolvido no 409 - esperado HTTP 200"
+    $ok = Invoke-Sincronizar -Agencia 0 -IdConta 3 -Tipo "SAQUE" -ValorOp $v -VetorConhecido $vetorNovo
+    if ($ok.Status -eq 200) {
+        Write-Host "  Sincronizacao aplicada. No terminal da agencia 0: SINCRONIZACAO_OFFLINE." -ForegroundColor Green
+    }
+}
+
 # ---------------------------------------------------------------- execucao
 
 switch ($Etapa) {
@@ -258,6 +324,7 @@ switch ($Etapa) {
     "pos" { EtapaPos }
     "timeline" { EtapaTimeline }
     "lider" { EtapaLider }
+    "sincronizar" { EtapaSincronizar }
     "todas" {
         EtapaPreparar
         EtapaTransferencia
