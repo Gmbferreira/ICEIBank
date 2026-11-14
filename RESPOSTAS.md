@@ -948,6 +948,162 @@ Uma forma simples de reduzir o custo seria a agência que já é líder responde
 eleição recebida apenas reenviando o anúncio para quem perguntou, em vez de refazer
 a eleição inteira e anunciar para todas.
 
+## [Sprint 3] Parte D (seção 8.3)
+
+**Execução de referência.** App rodando no Chrome
+(`flutter run -d chrome --dart-define=API_HOST=127.0.0.1`), com as 3 agências no ar.
+O emulador Android desta máquina ligava, mas a janela abria fora da área visível, e o
+notebook tem pouca RAM livre para a imagem do Pixel 10 Pro. Por isso os prints da
+Parte D foram feitos na versão web do mesmo app. O código é o mesmo; só muda o
+endereço das agências (ver P3). Failover em hora local, juntando o painel e os logs:
+
+```
+20:40:20      painel: "Agência 2 - informado pela agência 0"          (app-lider-atual.png)
+              janela da agência 2 fechada
+20:41:42.876  agencia-0  LIDER_NAO_RESPONDEU (liderAtual 2) -> ELEICAO_INICIADA
+20:41:42.906  agencia-1  LIDER_NAO_RESPONDEU (liderAtual 2) -> ELEICAO_INICIADA
+20:41:44.271  agencia-1  TORNOU_LIDER
+20:41:44.730  agencia-0  LIDER_ANUNCIADO (liderId 1)
+20:41:50      painel: "Agência 1 - informado pela agência 0"          (app-failover.png)
+```
+
+Ninguém tocou no app entre os dois prints: a troca apareceu na consulta periódica.
+
+**P1 - Como o app decide com que frequência consultar `/bully/lider`? Que trade-off
+você considerou ao escolher esse intervalo (resposta rápida a mudanças vs. consumo de
+bateria/rede do celular)?**
+
+O intervalo é fixo em **3 s**, igual ao heartbeat das agências
+(`MonitorLideranca`, em `lib/services/monitor_lideranca.dart`). O app não tem como
+saber de uma nova líder antes do próprio backend. A agência só percebe a queda no
+heartbeat seguinte (até 3 s), mais 1 s de timeout, e a eleição ainda leva cerca de
+1,5 s (no log acima, de `42.876` a `44.730`). Consultar mais rápido que o heartbeat
+só repetiria a mesma resposta várias vezes. Consultar bem mais devagar somaria um
+atraso a um processo que já leva alguns segundos. Com 3 s, o painel mostra a troca
+no máximo uma consulta depois de a agência consultada saber dela.
+
+O custo de rede em bytes é pequeno: é um GET sem corpo, com uma resposta de poucas
+dezenas de bytes, 20 vezes por minuto. No celular, o custo maior é **manter o rádio
+acordado**: requisições frequentes impedem que o modem volte ao modo de economia.
+Para limitar esse gasto, o app:
+
+- **para de consultar em segundo plano.** Um `AppLifecycleListener` na tela
+  principal chama `parar()` quando o app é escondido e `iniciar()` quando ele volta,
+  com uma consulta imediata. Ninguém vê o painel com o app minimizado, então não há
+  por que gastar bateria com ele;
+- **não acumula consultas.** A próxima só é agendada depois que a atual termina,
+  como no heartbeat do backend. Com as agências fora do ar, cada tentativa espera
+  até 2 s de timeout, e as consultas não se empilham;
+- **tem um botão de atualizar,** para quem quiser uma resposta na hora.
+
+O intervalo curto favorece a resposta rápida porque, neste sprint, o painel é a
+própria demonstração do consenso, e a pessoa está olhando para ele. Num app de
+produção, eu usaria um intervalo maior (10-30 s) ou um *backoff* que só aperta o
+intervalo depois de uma falha. O ideal seria trocar o polling por um aviso enviado
+pelo servidor (WebSocket, SSE ou push). O backend já sabe exatamente quando uma
+líder é anunciada (`/bully/coordenador`), mas isso exigiria um canal novo, fora do
+escopo da parte.
+
+**P2 - Se, num momento de transição, você consultasse duas agências diferentes e elas
+respondessem líderes diferentes (uma ainda não sabe da nova eleição), como seu app se
+comporta? Isso é um problema real, ou se resolve sozinho na próxima consulta?**
+
+O app não pergunta a várias agências na mesma consulta. Ele pergunta a **uma**, a
+última que respondeu, e só tenta as outras se ela falhar. Ele mostra o que essa
+agência acredita e sempre diz **quem** informou ("informado pela agência X"). Assim,
+uma resposta defasada fica identificável na tela.
+
+Na execução de referência, o app consultava a agência 0, que continuou no ar. A
+transição passou por três estados:
+
+1. **Logo depois de a agência 2 cair**, até `20:41:42.876`, a agência 0 ainda
+   respondia "líder 2". O heartbeat dela não tinha rodado, e o painel mostrava uma
+   líder que já não existia.
+2. **De `42.876` a `44.730`**, a agência 0 respondia `liderAtual: null`. Ela já
+   tinha descartado a antiga e esperava o resultado da eleição, e o painel mostrava
+   "Eleição em andamento".
+3. **A partir de `44.730`**, a resposta passou a ser "líder 1".
+
+Se a agência consultada fosse a que caiu, o app passaria para a próxima. Ela poderia
+dar uma resposta diferente da última exibida, e o painel apenas mostraria a nova
+resposta com a nova origem. Como a agência que respondeu passa a ser a preferida, o
+painel também não fica alternando entre duas agências que discordam.
+
+**Neste sprint, não é um problema real: a diferença se resolve sozinha** em, no
+máximo, um ciclo de heartbeat mais a eleição e mais uma consulta do app (alguns
+segundos). Durante essa janela, as próprias agências discordam entre si. O Bully só
+garante que elas **convergem**, não que concordem a cada instante, e o app apenas
+reflete isso. Além disso, a líder ainda é só informativa: nenhuma operação do app
+depende dela.
+
+Passaria a ser um problema no Sprint 4, se o **app** usasse a líder para decidir
+para onde mandar uma transação. Uma resposta defasada levaria a operação a uma
+agência morta ou que já não coordena nada. Duas proteções evitam isso:
+
+- deixar a decisão no backend: uma agência que não é a líder recusa ou repassa o
+  pedido;
+- numerar as eleições (um "mandato"): uma resposta com mandato menor seria
+  reconhecida como antiga e descartada.
+
+**P3 - Compare a arquitetura do app Flutter com a do frontend web do Sprint 1: o que
+foi reaproveitável (conceitos, não necessariamente código) e o que precisou ser
+pensado de forma diferente por ser uma plataforma mobile?**
+
+**Reaproveitado:**
+
+- **O contrato da API inteiro.** Login devolvendo JWT; o token no cabeçalho
+  `Authorization: Bearer`; erros no formato `{"erro": "..."}`; e o tratamento por
+  status: 401 volta para o login, 400 e 404 mostram a mensagem da agência. O backend
+  não mudou nada para o app existir, além da rota nova da Parte E.
+- **A separação entre a camada de API e a tela.** `api.ts` e `ApiErro` no web
+  viraram `api_client.dart` e `ApiErro` no app: as telas não montam URL nem leem
+  status HTTP.
+- **A persistência do token em armazenamento chave-valor:** `localStorage` no web,
+  `shared_preferences` no app, que é o equivalente nativo. O app também guarda a
+  expiração para não reaproveitar um token vencido.
+- **A transferência decidida pelo backend.** Os dois clientes só enviam origem,
+  destino e valor, e quem decide se a transferência é local ou entre agências é a
+  agência.
+
+**Pensado de forma diferente:**
+
+- **Escolha da agência.** No web, a pessoa escolhia a agência num seletor, e a URL
+  ficava no `localStorage`. No app não há seletor:
+  - cada operação vai sozinha para a agência responsável pela conta (`id % 3`,
+    `agenciaResponsavel` em `config.dart`);
+  - o login tenta as 3 agências em sequência;
+  - o painel de liderança também troca de agência quando uma não responde.
+
+  Num celular, a pessoa não deveria precisar conhecer a topologia do banco. Além
+  disso, a Parte F precisa saber qual é a agência responsável por cada operação
+  pendente.
+- **Endereço do backend.** No navegador, `localhost` é a própria máquina. No
+  emulador Android, `localhost` é o próprio emulador, e o computador fica em
+  `10.0.2.2`. O endereço ficou configurável na compilação
+  (`--dart-define=API_HOST=...`): o padrão é `10.0.2.2`, e para o Chrome se usa
+  `127.0.0.1`.
+- **HTTP sem TLS.** Desde o Android 9, apps não podem usar HTTP em texto puro por
+  padrão. Foi preciso liberar isso (`usesCleartextTraffic`) e declarar a permissão
+  de internet no `AndroidManifest.xml`. Em produção o certo seria HTTPS.
+- **Ciclo de vida.** Uma aba do navegador fica aberta ou fechada. Um app vai para
+  segundo plano e volta, e o sistema pode encerrá-lo. Isso levou à pausa do polling
+  (P1) e a um gerenciamento de estado que não depende da tela:
+  - o `MonitorLideranca` é um `ChangeNotifier` com timer próprio, e o painel só o
+    observa (`ListenableBuilder`);
+  - no web, bastava o `useState` de um único componente.
+- **Rede instável como caso normal.** No web, ficar sem conexão era um erro raro.
+  No app, toda requisição tem timeout (5 s nas operações, 2 s na consulta de líder),
+  e "sem conexão" (status 0 no `ApiErro`) é tratado separado dos erros HTTP. Essa
+  distinção prepara a Parte F, em que a falta de conexão deixa de ser erro e passa a
+  ser motivo para guardar a operação na fila de pendentes.
+- **Tela pequena.** No web, todos os formulários ficavam visíveis na mesma página.
+  No app, depósito, saque e transferência abrem um diálogo próprio
+  (`pedirOperacao`), e a tela principal fica só com o painel, a conta e os botões.
+- **CORS.** O frontend web dependia do CORS liberado no backend; um app nativo não
+  depende, porque o bloqueio é coisa do navegador. Rodando no Chrome, o app Flutter
+  volta a depender dele, e por isso funcionou sem mudança: o mesmo middleware que
+  atendia o frontend do Sprint 1 atendeu o app.
+
 ## [Sprint 3] Parte E (seção 9.6)
 
 **Execução de referência.** `.\agencia\testar.ps1 -Etapa sincronizar` (conta 3 na
