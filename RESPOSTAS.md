@@ -948,6 +948,121 @@ Uma forma simples de reduzir o custo seria a agência que já é líder responde
 eleição recebida apenas reenviando o anúncio para quem perguntou, em vez de refazer
 a eleição inteira e anunciar para todas.
 
+## [Sprint 3] Parte E (seção 9.6)
+
+**Execução de referência.** `.\agencia\testar.ps1 -Etapa sincronizar` (conta 3 na
+agência 0). Eventos registrados no `eventos-agencia-0.jsonl`:
+
+```
+13/11 11:51:51.427 agencia-0 [7, 2, 12] CRIAR_CONTA           {'id': 3, 'nomeAluno': 'Dani', 'saldoInicial': 100.0}
+   ... app lê o saldo e guarda vetorAtual = [7, 2, 12] ...
+13/11 11:51:51.500 agencia-0 [8, 2, 12] DEPOSITO              {'id': 3, 'valor': 50.0, 'novoSaldo': 150.0}
+   ... app sincroniza SAQUE de 20 com vetorConhecido [7, 2, 12] -> HTTP 409
+       (relacao ANTES, vetorAtual [8, 2, 12], contaAtual com saldo 150) ...
+13/11 11:51:51.617 agencia-0 [9, 2, 12] SINCRONIZACAO_OFFLINE {'id': 3, 'tipo': 'SAQUE', 'valor': 20.0,
+                                                              'novoSaldo': 130.0, 'vetorConhecido': [8, 2, 12]}
+```
+
+O 409 não gera evento (nada foi aplicado, o vetor não andou); o segundo envio, com
+o `vetorAtual` devolvido no próprio 409, foi aceito e virou `[9, 2, 12]`.
+
+**P1 - Por que a agência compara o vetor inteiro, e não só verifica se o saldo da
+conta mudou? O que a comparação de vetores detecta que uma simples comparação de
+saldo não detectaria?**
+
+O saldo é um **resultado**; o vetor é o **histórico** que levou até ele. Comparar só
+o saldo responde "o número é o mesmo?", e não "aconteceu alguma coisa desde que o
+app olhou?" - e é a segunda pergunta que importa para decidir se é seguro aplicar
+uma operação decidida com informação antiga. O que só o vetor detecta:
+
+- **Mudanças que se anulam.** Se, enquanto o app está offline, entram um depósito de
+  50 e um saque de 50, o saldo volta ao mesmo valor e a comparação de saldo diria
+  "nada mudou". O vetor avançou duas vezes, e o conflito é detectado. Em sistemas
+  distribuídos isso é o problema "ABA": o valor A virou B e voltou a A.
+- **Mudanças vindas de outras agências.** Um crédito de transferência que chega pelo
+  RabbitMQ passa pelo `ao_receber`, que funde o vetor da agência de origem. O vetor
+  registra **de onde** veio a influência, não só que o número mudou.
+- **A direção da diferença.** A comparação devolve `ANTES`, `DEPOIS` ou
+  `CONCORRENTES`, e não só "diferente". `ANTES` (o caso do teste) é o normal: o app
+  ficou para trás. `DEPOIS` significa que o app conhece um estado que a agência não
+  tem mais - por exemplo, quando a agência reiniciou e o relógio voltou a zero.
+  Comparando saldos, os dois casos seriam indistinguíveis.
+- **Sem depender do valor que o app tinha.** Para comparar saldos, o app teria de
+  mandar o saldo que viu e a agência teria de confiar nele. O vetor é um carimbo da
+  própria agência: o app só devolve o que recebeu.
+
+**P2 - Qualquer mudança no vetor da agência (mesmo em uma operação de outra conta) é
+tratada como conflito. Explique por que essa simplificação existe e o que seria
+necessário para tornar a detecção mais precisa, por conta.**
+
+A simplificação existe porque **o relógio vetorial é da agência, não da conta**: há
+uma única instância de `RelogioVetorial` por processo (`app.state.relogio`), e cada
+posição conta eventos de uma agência inteira. A agência não tem como saber, olhando
+só para `[7, 2, 12]` e `[8, 2, 12]`, se o evento que fez a posição 0 andar foi na
+conta 3 ou em qualquer outra. Na dúvida, recusa - erra para o lado seguro.
+
+O log de referência mostra que o problema é maior do que "operações de outras
+contas": a conta 3 foi criada com o vetor `[7, 2, 12]`, ou seja, a agência 0 já
+tinha avançado 6 vezes antes de qualquer operação bancária. Esses eventos são as
+**mensagens do Bully** (eleições e anúncios de coordenador também passam por
+`evento_local`, `ao_enviar` e `ao_receber`). Consequência prática: uma reeleição que
+aconteça enquanto o app está offline - sem nenhum centavo mexido - também faz a
+sincronização ser recusada. Numa agência com muitas contas e movimento, quase toda
+operação offline daria conflito.
+
+Para tornar a detecção precisa por conta:
+
+1. **Uma versão por conta.** Guardar na própria `Conta` um contador (ou um vetor de
+   versão, com uma posição por agência) que só avança quando **aquela conta** muda -
+   inclusive pelos créditos remotos que chegam pelo RabbitMQ. O `GET /contas/{id}`
+   devolveria essa versão, e o `/sincronizar` compararia só ela. Operações em outras
+   contas e mensagens do Bully deixariam de causar conflito.
+2. **Separar o relógio do consenso do relógio do banco**, se o vetor da agência
+   continuar sendo usado: as mensagens de eleição não deveriam contar como eventos
+   que invalidam operações bancárias.
+3. **Identificar a "vida" do processo.** O relógio zera quando a agência reinicia, e
+   os vetores se repetem entre execuções (no log, a conta 0 da execução das 21:49
+   também foi criada em `[7, 2, 12]`, o mesmo vetor da conta 3 de manhã). Um vetor
+   antigo guardado pelo app poderia, por coincidência, ser **igual** ao vetor atual
+   de uma execução nova, e a operação seria aceita como se nada tivesse mudado. Um
+   identificador de execução (gerado na subida) enviado junto com o vetor fecha essa
+   brecha. Hoje ela é contida por outro motivo - as contas também somem no reinício,
+   então a sincronização tende a cair em 404 - mas deixaria de ser se as contas
+   passassem a ser persistentes.
+
+**P3 - Quando a sincronização é recusada (409), a agência devolve o estado atual da
+conta. O que o app deveria fazer com essa informação - descartar a operação pendente,
+tentar de novo automaticamente, ou perguntar à pessoa usuária?**
+
+**Depende do tipo de operação - e para saque, perguntar à pessoa usuária.** Esta é a
+decisão de design que a Parte F implementa:
+
+- **Descartar em silêncio: não.** É dinheiro. A pessoa registrou uma operação e viu
+  um saldo provisório na tela; sumir com ela sem avisar é o pior resultado possível
+  num app bancário.
+- **Repetir automaticamente com o vetor novo: não para saque.** Reenviar com o
+  `vetorAtual` do 409 sempre "funciona" (o teste da Parte E mostrou isso), mas é
+  exatamente aplicar às cegas - só que com um passo a mais. Um saque é decidido com
+  base no saldo que a pessoa viu; se o saldo mudou (no teste, de 100 para 150; poderia
+  ter caído para 10), a decisão pode não fazer mais sentido.
+- **Depósito é diferente.** Um depósito não depende do saldo anterior (somar 50 dá o
+  mesmo efeito em qualquer ordem) e não pode falhar por saldo insuficiente. Para ele,
+  uma nova tentativa automática com o `vetorAtual` devolvido é segura, e a tela só
+  informa que ela aconteceu.
+
+Comportamento planejado para o app, em caso de 409: a operação pendente fica marcada
+como **"em conflito"** (não some da fila), o app substitui o saldo provisório pelo
+`contaAtual.saldo` real devolvido pela agência, e mostra um aviso com as duas ações -
+**"Aplicar mesmo assim"** (reenvia com o `vetorAtual` do 409) e **"Descartar"**. Assim
+quem decide o que fazer com o dinheiro é a pessoa, com o saldo verdadeiro na frente.
+
+Um detalhe que já foi preparado no backend para isso: a resposta de **sucesso** do
+`/sincronizar` também devolve o `vetorAtual`. Se a fila tiver duas operações
+offline, as duas foram guardadas com o mesmo vetor; depois que a primeira é aplicada,
+o vetor avança por causa dela mesma, e a segunda daria um conflito "falso". Com o
+vetor devolvido no sucesso, o app atualiza a próxima operação da fila antes de
+enviá-la.
+
 ## [Sprint 3] Notas de implementação
 
 - **Bully em asyncio, sem lock:** as rotas `/bully/*` são `async def` e as eleições e
@@ -964,6 +1079,16 @@ a eleição inteira e anunciar para todas.
   verificação não encerra o heartbeat.
 - **URLs entre agências em `127.0.0.1`:** ver P3 da Parte B. O frontend continua
   usando `localhost`, porque o navegador não tem o timeout curto do Bully.
+- **Sincronização atômica (`RelogioVetorial.executar_se_atual`):** no exemplo em
+  Node, comparar os vetores e depois aplicar a operação é seguro porque há uma única
+  thread. Aqui as rotas `def` rodam numa pool de threads e o consumidor do RabbitMQ
+  em outra; entre a comparação e a aplicação, outro depósito poderia avançar o vetor.
+  A comparação, a operação e o incremento acontecem dentro da mesma lock do relógio,
+  pela qual todo evento da agência passa. Validado com 200 sincronizações
+  simultâneas usando o mesmo vetor: exatamente 1 foi aplicada.
+- **409 montado sem `HTTPException`:** o tratador de erros do `app.py` embrulharia o
+  corpo em `{"erro": {...}}`; o app precisa de `vetorAtual` e `contaAtual` no nível
+  de cima do JSON.
 - **`agencia/subir.ps1`:** abre uma janela por agência (logs separados para as
   evidências, e derrubar uma agência é fechar a janela). A URL do RabbitMQ fica em
   `agencia/.env`, fora do Git.
