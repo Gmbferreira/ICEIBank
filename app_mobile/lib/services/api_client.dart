@@ -30,6 +30,27 @@ class ApiErro implements Exception {
   String toString() => semConexao ? mensagem : 'HTTP $status: $mensagem';
 }
 
+/// Resposta de GET /bully/lider: qual agencia respondeu e quem ela acha que e a lider.
+class RespostaLider {
+  const RespostaLider(this.idAgencia, this.liderAtual);
+
+  final int idAgencia;
+
+  /// null enquanto a agencia ainda nao conhece uma lider (eleicao em andamento).
+  final int? liderAtual;
+}
+
+/// Resultado de POST /transferencias.
+class ResultadoTransferencia {
+  const ResultadoTransferencia(this.mensagem, {required this.assincrona});
+
+  final String mensagem;
+
+  /// true quando o destino e de outra agencia: o debito ja aconteceu e o credito
+  /// chega depois, pelo RabbitMQ (Sprint 2).
+  final bool assincrona;
+}
+
 /// Cliente da API das agencias - o equivalente mobile do frontend/src/api.ts.
 ///
 /// Diferenca de design em relacao ao web: la a pessoa escolhe a "agencia de
@@ -47,6 +68,7 @@ class ApiClient {
     String metodo,
     String caminho, {
     Map<String, Object?>? corpo,
+    Duration timeout = timeoutRequisicao,
   }) async {
     final uri = Uri.parse('${urlAgencia(agencia)}$caminho');
     final cabecalhos = <String, String>{};
@@ -59,7 +81,7 @@ class ApiClient {
       final envio = metodo == 'GET'
           ? _http.get(uri, headers: cabecalhos)
           : _http.post(uri, headers: cabecalhos, body: jsonEncode(corpo));
-      resposta = await envio.timeout(timeoutRequisicao);
+      resposta = await envio.timeout(timeout);
     } on TimeoutException {
       throw ApiErro(0, 'Agencia $agencia nao respondeu a tempo.', agencia: agencia);
     } on http.ClientException {
@@ -123,5 +145,61 @@ class ApiClient {
   Future<Conta> consultarSaldo(int idConta) async {
     final json = await _requisicao(agenciaResponsavel(idConta), 'GET', '/contas/$idConta');
     return Conta.fromJson(json as Map<String, dynamic>);
+  }
+
+  /// Deposito, na agencia dona da conta.
+  Future<Conta> depositar(int idConta, double valor) async {
+    final json = await _requisicao(
+      agenciaResponsavel(idConta),
+      'POST',
+      '/contas/$idConta/depositar',
+      corpo: {'valor': valor},
+    );
+    return Conta.fromJson(json as Map<String, dynamic>);
+  }
+
+  /// Saque, na agencia dona da conta. Saldo insuficiente -> ApiErro 400.
+  Future<Conta> sacar(int idConta, double valor) async {
+    final json = await _requisicao(
+      agenciaResponsavel(idConta),
+      'POST',
+      '/contas/$idConta/sacar',
+      corpo: {'valor': valor},
+    );
+    return Conta.fromJson(json as Map<String, dynamic>);
+  }
+
+  /// Transferencia. Vai sempre para a agencia da conta de ORIGEM, que e quem
+  /// debita; se o destino for de outra agencia, o credito segue pelo RabbitMQ.
+  Future<ResultadoTransferencia> transferir(int idOrigem, int idDestino, double valor) async {
+    final json = await _requisicao(
+      agenciaResponsavel(idOrigem),
+      'POST',
+      '/transferencias',
+      corpo: {'idOrigem': idOrigem, 'idDestino': idDestino, 'valor': valor},
+    ) as Map<String, dynamic>;
+    return ResultadoTransferencia(
+      (json['mensagem'] as String?) ?? 'Transferencia realizada.',
+      assincrona: json['status'] == 'publicada' ||
+          agenciaResponsavel(idOrigem) != agenciaResponsavel(idDestino),
+    );
+  }
+
+  /// GET /bully/lider em uma agencia especifica (rota sem JWT).
+  ///
+  /// Timeout menor que o das operacoes: o painel consulta varias agencias em
+  /// sequencia quando alguma esta fora do ar, e nao pode ficar 5 s parado em
+  /// cada uma.
+  Future<RespostaLider> consultarLider(int agencia) async {
+    final json = await _requisicao(
+      agencia,
+      'GET',
+      '/bully/lider',
+      timeout: const Duration(seconds: 2),
+    ) as Map<String, dynamic>;
+    return RespostaLider(
+      (json['idAgencia'] as num?)?.toInt() ?? agencia,
+      (json['liderAtual'] as num?)?.toInt(),
+    );
   }
 }
