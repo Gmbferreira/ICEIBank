@@ -9,6 +9,12 @@ String formatarHora(DateTime hora) {
   return '${dois(hora.hour)}:${dois(hora.minute)}:${dois(hora.second)}';
 }
 
+/// DateTime -> "15/11 18:52:07"
+String formatarDataHora(DateTime momento) {
+  String dois(int n) => n.toString().padLeft(2, '0');
+  return '${dois(momento.day)}/${dois(momento.month)} ${formatarHora(momento)}';
+}
+
 /// Le um valor digitado aceitando virgula ou ponto ("20,50" ou "20.50").
 /// Devolve null se nao for um numero.
 double? lerValor(String texto) => double.tryParse(texto.trim().replaceAll(',', '.'));

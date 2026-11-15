@@ -1,14 +1,23 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:material_ui/material_ui.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:iceibank_app/config.dart';
 import 'package:iceibank_app/main.dart';
 import 'package:iceibank_app/services/api_client.dart';
+import 'package:iceibank_app/services/armazenamento_local.dart';
 import 'package:iceibank_app/services/sessao.dart';
 
 void main() {
+  late ArmazenamentoLocal armazenamento;
+
+  setUpAll(() async {
+    SharedPreferences.setMockInitialValues({});
+    armazenamento = await ArmazenamentoLocal.abrir();
+  });
+
   testWidgets('sem sessao, o app abre na tela de login', (tester) async {
-    await tester.pumpWidget(IceibankApp(api: ApiClient(Sessao.vazia())));
+    await tester.pumpWidget(IceibankApp(api: ApiClient(Sessao.vazia()), armazenamento: armazenamento));
 
     expect(find.text('ICEIBank'), findsOneWidget);
     expect(find.widgetWithText(TextField, 'Usuário'), findsOneWidget);
@@ -17,7 +26,7 @@ void main() {
   });
 
   testWidgets('login sem preencher mostra erro visivel', (tester) async {
-    await tester.pumpWidget(IceibankApp(api: ApiClient(Sessao.vazia())));
+    await tester.pumpWidget(IceibankApp(api: ApiClient(Sessao.vazia()), armazenamento: armazenamento));
 
     await tester.tap(find.text('Entrar'));
     await tester.pump();

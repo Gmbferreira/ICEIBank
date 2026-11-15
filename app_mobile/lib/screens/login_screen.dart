@@ -1,13 +1,15 @@
 import 'package:material_ui/material_ui.dart';
 
 import '../services/api_client.dart';
+import '../services/armazenamento_local.dart';
 import '../widgets/mensagem_erro.dart';
 import 'home_screen.dart';
 
 class LoginScreen extends StatefulWidget {
-  const LoginScreen({super.key, required this.api, this.aviso});
+  const LoginScreen({super.key, required this.api, required this.armazenamento, this.aviso});
 
   final ApiClient api;
+  final ArmazenamentoLocal armazenamento;
 
   /// Mensagem mostrada ao abrir a tela, ex.: "Sessao expirada" depois de um 401.
   final String? aviso;
@@ -50,7 +52,7 @@ class _LoginScreenState extends State<LoginScreen> {
       await widget.api.login(usuario, senha);
       if (!mounted) return;
       Navigator.of(context).pushReplacement(
-        MaterialPageRoute<void>(builder: (_) => HomeScreen(api: widget.api)),
+        MaterialPageRoute<void>(builder: (_) => HomeScreen(api: widget.api, armazenamento: widget.armazenamento)),
       );
     } on ApiErro catch (erro) {
       if (!mounted) return;

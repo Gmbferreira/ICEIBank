@@ -51,6 +51,30 @@ class ResultadoTransferencia {
   final bool assincrona;
 }
 
+/// Corpo do 409 de POST /contas/{id}/sincronizar (Parte E): o estado real da
+/// conta e o vetor da agencia no momento da recusa.
+class ConflitoSincronizacao {
+  const ConflitoSincronizacao(this.contaAtual, this.vetorAtual);
+
+  /// Conta como esta na agencia (com o vetorAtual do 409 embutido).
+  final Conta contaAtual;
+  final List<int> vetorAtual;
+
+  /// null se o erro nao trouxer contaAtual (ex.: 409 de outra rota).
+  static ConflitoSincronizacao? de(ApiErro erro) {
+    final corpo = erro.corpo;
+    if (corpo is! Map || corpo['contaAtual'] is! Map) return null;
+    final vetor = ((corpo['vetorAtual'] as List<dynamic>?) ?? const [])
+        .map((v) => (v as num).toInt())
+        .toList();
+    final conta = Conta.fromJson({
+      ...Map<String, dynamic>.from(corpo['contaAtual'] as Map),
+      'vetorAtual': vetor,
+    });
+    return ConflitoSincronizacao(conta, vetor);
+  }
+}
+
 /// Cliente da API das agencias - o equivalente mobile do frontend/src/api.ts.
 ///
 /// Diferenca de design em relacao ao web: la a pessoa escolhe a "agencia de
@@ -183,6 +207,19 @@ class ApiClient {
       assincrona: json['status'] == 'publicada' ||
           agenciaResponsavel(idOrigem) != agenciaResponsavel(idDestino),
     );
+  }
+
+  /// Parte F: envia uma operacao feita offline, com o vetor que o app conhecia.
+  /// Sucesso devolve a conta ja com o vetorAtual novo; conflito vira ApiErro
+  /// 409 com ConflitoSincronizacao.de(erro) disponivel.
+  Future<Conta> sincronizar(int idConta, String tipo, double valor, List<int> vetorConhecido) async {
+    final json = await _requisicao(
+      agenciaResponsavel(idConta),
+      'POST',
+      '/contas/$idConta/sincronizar',
+      corpo: {'tipo': tipo, 'valor': valor, 'vetorConhecido': vetorConhecido},
+    );
+    return Conta.fromJson(json as Map<String, dynamic>);
   }
 
   /// GET /bully/lider em uma agencia especifica (rota sem JWT).
