@@ -950,24 +950,32 @@ a eleição inteira e anunciar para todas.
 
 ## [Sprint 3] Parte D (seção 8.3)
 
-**Execução de referência.** App rodando no Chrome
-(`flutter run -d chrome --dart-define=API_HOST=127.0.0.1`), com as 3 agências no ar.
-O emulador Android desta máquina ligava, mas a janela abria fora da área visível, e o
-notebook tem pouca RAM livre para a imagem do Pixel 10 Pro. Por isso os prints da
-Parte D foram feitos na versão web do mesmo app. O código é o mesmo; só muda o
-endereço das agências (ver P3). Failover em hora local, juntando o painel e os logs:
+**Execução de referência.** App rodando no emulador Android (AVD "Small Phone",
+Android 14, `flutter run`), com as 3 agências no ar. Os primeiros testes foram feitos
+na versão web do mesmo app, no Chrome, porque o emulador do Pixel 10 Pro abria fora
+da área visível da tela. Os prints finais foram refeitos no emulador, com um AVD mais
+leve.
+
+O relógio do emulador estava em **UTC**. Por isso o horário da barra de status e o
+"Atualizado às" do painel, nos prints, estão 3 h à frente da hora local: 18:47 no
+print corresponde a 15:47 em Brasília. É o mesmo fuso do campo `horaParede` dos logs.
+Abaixo, tudo em hora local, juntando o painel e os logs:
 
 ```
-20:40:20      painel: "Agência 2 - informado pela agência 0"          (app-lider-atual.png)
+15:47:56      painel: "Agência 2 - informado pela agência 0"          (app-lider-atual.png)
               janela da agência 2 fechada
-20:41:42.876  agencia-0  LIDER_NAO_RESPONDEU (liderAtual 2) -> ELEICAO_INICIADA
-20:41:42.906  agencia-1  LIDER_NAO_RESPONDEU (liderAtual 2) -> ELEICAO_INICIADA
-20:41:44.271  agencia-1  TORNOU_LIDER
-20:41:44.730  agencia-0  LIDER_ANUNCIADO (liderId 1)
-20:41:50      painel: "Agência 1 - informado pela agência 0"          (app-failover.png)
+15:56:42.471  agencia-1  LIDER_NAO_RESPONDEU (liderAtual 2) -> ELEICAO_INICIADA
+15:56:44.007  agencia-1  TORNOU_LIDER
+15:56:44.879  agencia-0  LIDER_ANUNCIADO (liderId 1)
+15:56:45.891  agencia-0  LIDER_NAO_RESPONDEU (liderAtual 1) -> ELEICAO_INICIADA
+15:56:47      painel: "Eleição em andamento"
+15:56:47.881  agencia-1  TORNOU_LIDER (de novo)
+15:56:48.325  agencia-0  LIDER_ANUNCIADO (liderId 1)
+15:57:14      painel: "Agência 1 - informado pela agência 0"          (app-failover.png)
 ```
 
-Ninguém tocou no app entre os dois prints: a troca apareceu na consulta periódica.
+Ninguém tocou no app entre os prints: as trocas apareceram na consulta periódica. A
+segunda eleição, iniciada pela agência 0, é explicada na P2.
 
 **P1 - Como o app decide com que frequência consultar `/bully/lider`? Que trade-off
 você considerou ao escolher esse intervalo (resposta rápida a mudanças vs. consumo de
@@ -977,7 +985,7 @@ O intervalo é fixo em **3 s**, igual ao heartbeat das agências
 (`MonitorLideranca`, em `lib/services/monitor_lideranca.dart`). O app não tem como
 saber de uma nova líder antes do próprio backend. A agência só percebe a queda no
 heartbeat seguinte (até 3 s), mais 1 s de timeout, e a eleição ainda leva cerca de
-1,5 s (no log acima, de `42.876` a `44.730`). Consultar mais rápido que o heartbeat
+1,5 s (no log acima, de `42.487` a `44.007`). Consultar mais rápido que o heartbeat
 só repetiria a mesma resposta várias vezes. Consultar bem mais devagar somaria um
 atraso a um processo que já leva alguns segundos. Com 3 s, o painel mostra a troca
 no máximo uma consulta depois de a agência consultada saber dela.
@@ -1014,15 +1022,19 @@ agência acredita e sempre diz **quem** informou ("informado pela agência X"). 
 uma resposta defasada fica identificável na tela.
 
 Na execução de referência, o app consultava a agência 0, que continuou no ar. A
-transição passou por três estados:
+transição passou por quatro estados, porque houve uma segunda eleição:
 
-1. **Logo depois de a agência 2 cair**, até `20:41:42.876`, a agência 0 ainda
-   respondia "líder 2". O heartbeat dela não tinha rodado, e o painel mostrava uma
-   líder que já não existia.
-2. **De `42.876` a `44.730`**, a agência 0 respondia `liderAtual: null`. Ela já
-   tinha descartado a antiga e esperava o resultado da eleição, e o painel mostrava
-   "Eleição em andamento".
-3. **A partir de `44.730`**, a resposta passou a ser "líder 1".
+1. **Até `15:56:44.879`**, a agência 0 ainda respondia "líder 2". A agência 1
+   percebeu a queda primeiro (`42.471`) e se elegeu antes de o heartbeat da agência 0
+   rodar, e o painel mostrava uma líder que já não existia.
+2. **De `44.879` a `45.891`**, com o anúncio da agência 1, a resposta passou a ser
+   "líder 1".
+3. **De `45.891` a `48.325`**, a agência 0 respondia `liderAtual: null`. O heartbeat
+   dela para a nova líder estourou o timeout de 1 s (a máquina estava sobrecarregada
+   pelo emulador), ela descartou a líder 1 e começou outra eleição. O painel "voltou
+   atrás" para "Eleição em andamento".
+4. **A partir de `48.325`**, a agência 1 venceu de novo, e a resposta voltou a ser
+   "líder 1".
 
 Se a agência consultada fosse a que caiu, o app passaria para a próxima. Ela poderia
 dar uma resposta diferente da última exibida, e o painel apenas mostraria a nova
@@ -1100,9 +1112,9 @@ pensado de forma diferente por ser uma plataforma mobile?**
   No app, depósito, saque e transferência abrem um diálogo próprio
   (`pedirOperacao`), e a tela principal fica só com o painel, a conta e os botões.
 - **CORS.** O frontend web dependia do CORS liberado no backend; um app nativo não
-  depende, porque o bloqueio é coisa do navegador. Rodando no Chrome, o app Flutter
-  volta a depender dele, e por isso funcionou sem mudança: o mesmo middleware que
-  atendia o frontend do Sprint 1 atendeu o app.
+  depende, porque o bloqueio é coisa do navegador. Nos primeiros testes, feitos no
+  Chrome, o app Flutter voltou a depender dele e funcionou sem mudança: o mesmo
+  middleware que atendia o frontend do Sprint 1 atendeu o app.
 
 ## [Sprint 3] Parte E (seção 9.6)
 
@@ -1218,6 +1230,167 @@ offline, as duas foram guardadas com o mesmo vetor; depois que a primeira é apl
 o vetor avança por causa dela mesma, e a segunda daria um conflito "falso". Com o
 vetor devolvido no sucesso, o app atualiza a próxima operação da fila antes de
 enviá-la.
+
+## [Sprint 3] Parte F (seção 10.3)
+
+**Execução de referência.** Emulador Android ("Small Phone", Android 14), com as 3
+agências no ar e a conta 3 (agência 0) criada com R$ 100. Como na Parte D, os
+horários dos prints estão em UTC; abaixo, em hora local, juntando a tela e o log da
+agência 0:
+
+```
+15:35:02  CRIAR_CONTA  conta 3, saldo 100                              vetor [7, 2, 12]
+15:49:20  app consulta a conta 3: saldo e vetor [7, 2, 12] vão para o cache
+          modo avião -> depósito de 50 entra na fila
+          tela: R$ 150,00 provisório, "1 operação pendente",
+                confirmado R$ 100,00, "Sem conexão"                (app-offline.png)
+          modo avião desligado, sem tocar no app
+15:54:07  SINCRONIZACAO_OFFLINE  DEPOSITO 50, vetorConhecido [7, 2, 12]
+          -> saldo 150, vetor [8, 2, 12]                             (app-sincronizacao.png)
+15:56:42  failover da Parte D: as eleições levam o vetor da agência 0 a [14, 17, 14]
+          modo avião -> saque de 20 entra na fila com vetorConhecido [8, 2, 12]
+          modo avião desligado -> 409, porque [8, 2, 12] != [14, 17, 14]
+          tela: saque "em conflito", saldo real R$ 150,00
+16:07:08  "Aplicar mesmo assim": SINCRONIZACAO_OFFLINE  SAQUE 20,
+          vetorConhecido [14, 17, 14] -> saldo 130
+```
+
+**P1 - Qual biblioteca de armazenamento local você escolheu, e por quê? Quais
+alternativas você considerou?**
+
+**`shared_preferences`, com os dados em JSON**, atrás de uma classe própria
+(`ArmazenamentoLocal`, em `lib/services/armazenamento_local.dart`). São duas chaves:
+
+- `iceibank_cache_contas`: para cada conta consultada, saldo, `vetorAtual` e o
+  horário da leitura;
+- `iceibank_fila_pendentes`: a fila, em ordem, com tipo, valor, `vetorConhecido`,
+  estado (pendente ou em conflito) e, no conflito, o saldo real e o vetor do 409.
+
+Por que esta biblioteca:
+
+- **Os dados são pequenos e sempre lidos inteiros.** São algumas contas e uma fila
+  curta, processada do início ao fim. Não há consulta, filtro nem relacionamento, que
+  é onde um banco SQL compensaria.
+- **Já era dependência do app** (guarda o token desde a Parte D) e funciona igual no
+  Android (um arquivo XML privado do app) e no navegador (`localStorage`). Os
+  primeiros testes do app foram no Chrome, e com ela o mesmo código serviu aos dois.
+- **Leitura sem custo na tela.** A classe carrega tudo uma vez, mantém uma cópia em
+  memória e grava a cada mudança. A tela lê o cartão da conta a cada reconstrução sem
+  decodificar JSON de novo.
+
+Alternativas consideradas:
+
+- **`sqflite`:** SQL de verdade, com transações. Seria a escolha para um histórico
+  grande de operações. Não roda no navegador sem um pacote extra, e exige esquema e
+  migrações para o que aqui são duas listas.
+- **Hive:** rápido e funciona no web, mas para guardar objetos próprios exige
+  *adapters* (escritos à mão ou gerados), uma dependência a mais sem ganho para este
+  volume.
+- **Drift:** SQL tipado sobre SQLite, com geração de código (`build_runner`). É a
+  mais robusta, e também a mais pesada para duas tabelas.
+
+Limitações conhecidas: o `shared_preferences` não tem transação (cada gravação
+reescreve a lista inteira) nem criptografia. Num banco real, os dados ficariam num
+armazenamento cifrado (por exemplo, SQLCipher ou `flutter_secure_storage`). Como só
+o `ArmazenamentoLocal` conhece a biblioteca, trocá-la mexeria em um arquivo.
+
+**P2 - Na tarefa 5, o que exatamente aconteceu na tela do app quando a sincronização
+foi recusada? Descreva o comportamento que você implementou e explique por que
+escolheu essa abordagem em vez de outra.**
+
+**O que aconteceu.** Ao desligar o modo avião, o app tentou sincronizar sozinho, e a
+agência respondeu 409. Na tela:
+
+- apareceu um aviso em destaque (*snackbar* vermelho, 10 s, com botão de fechar):
+  o saque pendente de R$ 20,00 na conta 3 **não foi aplicado**, porque a conta mudou
+  na agência enquanto o app estava offline;
+- o item do saque ficou vermelho, com "NÃO foi aplicado", o **saldo real** devolvido
+  pela agência (`contaAtual.saldo`), o vetor atual dela e os botões **Aplicar mesmo
+  assim** e **Descartar**;
+- o cartão da conta deixou de mostrar o saldo provisório (R$ 130,00) e passou a
+  mostrar o saldo real (R$ 150,00). O saque em conflito não entra mais na conta do
+  saldo provisório, porque não foi aplicado.
+
+Ao tocar em **Aplicar mesmo assim**, o app reenviou o saque com o `vetorAtual` que
+veio no 409 (`[14, 17, 14]` no log), a agência aplicou, e o saldo foi para
+R$ 130,00 com um aviso de confirmação.
+
+**O que causou o conflito.** Nesta execução, o saldo da conta não mudou por fora: o
+vetor da agência 0 avançou por causa das **eleições** do teste de failover
+(`[8, 2, 12]` para `[14, 17, 14]`). É a simplificação da P2 da Parte E vista na
+prática. O vetor é da agência, não da conta, e qualquer evento dela (até uma
+mensagem do Bully) torna o vetor guardado pelo app antigo. O comportamento da tela é
+o mesmo quando o saldo muda de verdade; a diferença está no número mostrado como
+saldo real. Esse caso, com um depósito feito por fora, foi testado no backend na
+Parte E (`conflito-sincronizacao.png`) e nos testes automáticos do app
+(`test/sincronizador_test.dart`: saque em conflito com saldo real diferente,
+depósito reaplicado, descarte).
+
+**O comportamento implementado** (`Sincronizador`, em
+`lib/services/sincronizador.dart`) segue a decisão da P3 da Parte E:
+
+- **Saque em conflito: a pessoa decide.** Ele fica parado na fila como "em conflito"
+  até alguém tocar em um dos botões. Um saque foi decidido com base no saldo que a
+  pessoa via; se o saldo mudou, só ela sabe se o saque ainda faz sentido. As
+  operações seguintes da mesma conta esperam essa decisão, para não serem aplicadas
+  na frente dela.
+- **Depósito em conflito: uma nova tentativa automática**, com o vetor do 409 e um
+  aviso dizendo que houve conflito e qual era o saldo real. Somar um valor não depende
+  do saldo anterior. Se a segunda tentativa também der 409, ele passa a esperar a
+  decisão da pessoa, como o saque: o app não fica repetindo em laço.
+- **Outras respostas.** 400 (ex.: saldo insuficiente) tira a operação da fila com
+  aviso, porque repetir daria a mesma resposta. Falta de conexão ou erro 5xx mantém a
+  operação para a próxima tentativa. 401 mantém a fila e leva ao login; a
+  sincronização continua depois.
+
+Por que não as alternativas:
+
+- **descartar em silêncio** sumiria com uma operação que a pessoa viu acontecer;
+- **reenviar tudo automaticamente** com o vetor novo seria aplicar às cegas, com um
+  passo a mais, justamente o que a comparação de vetores quer evitar;
+- **perguntar também nos depósitos** daria trabalho à pessoa sem proteger nada, já
+  que o resultado de um depósito não depende do saldo.
+
+**P3 - UI otimista significa mostrar o resultado esperado antes de ter certeza de que
+ele vai acontecer. Que risco isso traz para um aplicativo bancário, especificamente?
+Como seu design tenta reduzir esse risco?**
+
+O risco é a pessoa **agir com base num dinheiro que ainda não existe** (ou que ainda
+não saiu). Ela vê R$ 150 depois de um depósito offline e assume um compromisso com
+esse valor. Ou vê o saque descontado e entende que o dinheiro já saiu, quando a
+operação ainda pode ser recusada (saldo insuficiente) ou cair em conflito. Outro
+risco: achar que a operação falhou e repeti-la, contando o mesmo valor duas vezes.
+Num app de lista de tarefas, um item otimista que some é um incômodo; num banco, é
+uma decisão financeira tomada com um número errado.
+
+Como o design reduz esse risco:
+
+- **O provisório nunca aparece sozinho.** O saldo com pendências fica em itálico e em
+  outra cor, com o selo "Saldo provisório • N operações pendentes", e logo abaixo vem
+  "Confirmado pela agência: R$ ...". Sem conexão, o cartão diz de quando é o dado
+  ("último dado conhecido, de 15/11 18:49:20").
+- **Cada pendência é visível e individual**, com o selo "Pendente de sincronização".
+  O resultado também aparece: um aviso quando sincroniza, quando é recusada e quando
+  dá conflito.
+- **O app não aceita offline o que já sabe ser impossível.** Um saque maior que o
+  saldo provisório nem entra na fila.
+- **No conflito, o provisório dá lugar ao real.** O cartão passa a mostrar o saldo
+  devolvido pela agência, e o saque espera a pessoa decidir com esse número na frente.
+- **A ordem é preservada.** Com pendências numa conta, uma nova operação também vai
+  para a fila em vez de passar na frente. Transferências não ficam pendentes offline e
+  são bloqueadas enquanto a conta tiver pendências, porque o `/sincronizar` só cobre
+  depósito e saque, e uma transferência pode envolver duas agências.
+- **A fila é persistida.** Fechar o app ou reiniciar o aparelho não apaga uma
+  operação que a pessoa viu como feita.
+
+Uma limitação ficou para frente: a **idempotência**. Se a agência aplicar uma
+operação e a resposta se perder no caminho (timeout), o app a mantém na fila e a
+reenvia. Para um saque, o reenvio leva o vetor antigo, e a comparação de vetores o
+transforma em conflito em vez de saque duplo. Mas o depósito, que é reaplicado
+automaticamente no conflito, seria somado duas vezes. A correção é o backend aceitar
+um identificador da operação (o app já gera um para cada pendência) e ignorar um
+identificador repetido. Num banco real, eu também limitaria o valor dos saques
+offline.
 
 ## [Sprint 3] Notas de implementação
 
