@@ -2,6 +2,8 @@
     Sprint 2 - roteiro de teste do ICEIBank (Publish/Subscribe via RabbitMQ).
     Sprint 3 - etapa "lider": consulta /bully/lider nas 3 agencias (eleicao e failover).
     Sprint 3 - etapa "sincronizar": conflito offline-first via relogio vetorial (409).
+    Etapa "contas": cria as contas de teste 0, 1, 2 e 3 (as contas vivem em memoria
+    e somem a cada reinicio das agencias).
 
     Este script existe para nao depender de colar comandos longos no PowerShell:
     no PowerShell 5.1 as aspas duplas de um JSON escrito a mao sao removidas ao
@@ -16,12 +18,16 @@
         .\agencia\testar.ps1 -Etapa pos
         .\agencia\testar.ps1 -Etapa lider
         .\agencia\testar.ps1 -Etapa sincronizar
+        .\agencia\testar.ps1 -Etapa contas
+
+    Para a linha do tempo da Sprint 2, rode -Etapa timeline ANTES de -Etapa contas,
+    logo depois de subir as agencias: a timeline precisa criar as contas ela mesma.
 
     Cada etapa imprime Get-Date antes da acao, para o print ter data/hora visivel.
 #>
 
 param(
-    [ValidateSet("preparar", "transferencia", "resiliencia", "pos", "timeline", "lider", "sincronizar", "todas")]
+    [ValidateSet("preparar", "transferencia", "resiliencia", "pos", "timeline", "lider", "sincronizar", "contas", "todas")]
     [string]$Etapa = "todas",
     # 4021 = 4000 + OFFSET 21 (config.py). As tres agencias ficam em
     # PortaBase, PortaBase+1 e PortaBase+2.
@@ -315,6 +321,31 @@ function EtapaSincronizar {
     }
 }
 
+function EtapaContas {
+    # Contas de teste para o app e as demonstracoes: uma por agencia (id % 3) e a
+    # conta 3, usada pelo app Flutter. HTTP 409 ("ja existe") e normal e nao
+    # interrompe: a etapa pode ser rodada quantas vezes for preciso.
+    Conectar
+    $contas = @(
+        @{ id = 0; nomeAluno = "Ana" },
+        @{ id = 1; nomeAluno = "Bia" },
+        @{ id = 2; nomeAluno = "Carla" },
+        @{ id = 3; nomeAluno = "Dani" }
+    )
+    foreach ($conta in $contas) {
+        $agencia = $conta.id % 3
+        Mostrar-Data "Criando a conta $($conta.id) ($($conta.nomeAluno)) na agencia $agencia, saldo 100"
+        Invoke-Api -Agencia $agencia -Rota "/contas" -Metodo "POST" -Corpo @{ id = $conta.id; nomeAluno = $conta.nomeAluno; saldoInicial = 100 } | Out-Null
+    }
+
+    Mostrar-Data "Saldos atuais das contas de teste"
+    foreach ($conta in $contas) {
+        Invoke-Api -Agencia ($conta.id % 3) -Rota "/contas/$($conta.id)" | Out-Null
+    }
+    Write-Host ""
+    Write-Host "Contas prontas. HTTP 409 na criacao significa 'ja existia' - sem problema." -ForegroundColor Yellow
+}
+
 # ---------------------------------------------------------------- execucao
 
 switch ($Etapa) {
@@ -325,6 +356,7 @@ switch ($Etapa) {
     "timeline" { EtapaTimeline }
     "lider" { EtapaLider }
     "sincronizar" { EtapaSincronizar }
+    "contas" { EtapaContas }
     "todas" {
         EtapaPreparar
         EtapaTransferencia
